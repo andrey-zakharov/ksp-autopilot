@@ -169,11 +169,11 @@ UNTIL phase = "done" {
     SET horizSpeed TO SQRT(MAX(0, speed * speed - vertSpeed * vertSpeed)).
     
     IF autoStage AND now >= nextStageTime AND shouldStage() {
-        SET throttleSet TO 0.
+        // SET throttleSet TO 0.
         STAGE.
         SET nextStageTime TO now + stageDelay.
         WAIT 0.5.
-        IF phase = "ascent" { SET throttleSet TO 1. }
+        // IF phase = "ascent" { SET throttleSet TO 1. }
     }
     
     IF phase = "ascent" {
@@ -234,7 +234,6 @@ UNTIL phase = "done" {
             SET dV TO MAX(0, v_circ - v_ap).
             
             IF dV > 1 {
-                // ИСПРАВЛЕНИЕ: используем TimeSpan для ETA
                 SET circNode TO NODE(TimeSpan(eta_ap), 0, 0, dV).
                 ADD circNode.
                 PRINT "Node created at Ap. Required dV: " + ROUND(dV, 2) + " m/s".
@@ -244,26 +243,12 @@ UNTIL phase = "done" {
             }
         }
         
-        // Расчет времени старта горения
+        // Если нода есть — передаем управление скрипту выполнения
         IF ALLNODES:LENGTH > 0 {
-            SET n TO ALLNODES[0].
-            SET accel TO MAX(0.1, SHIP:MAXTHRUST / SHIP:MASS).
-            SET burnTime TO n:DELTAV:MAG / accel.
-            SET startBurnETA TO (burnTime / 2) + 5.
-            
-            // Ускорение времени до старта горения
-            IF n:ETA > startBurnETA + 30 {
-                SET WARP TO 3.
-                WAIT UNTIL n:ETA <= startBurnETA + 30 OR ALLNODES:LENGTH = 0.
-                SET WARP TO 0.
-            }
-            
-            // Вызов отдельного скрипта для выполнения ноды
-            IF n:ETA <= startBurnETA + 30 {
-                PRINT "Calling exec_node.ks to execute maneuver...".
-                RUN exec_node.
-                SET phase TO "done".
-            }
+            PRINT "Calling exec_node.ks to execute maneuver...".
+            UNLOCK THROTTLE.  // Освобождаем газ для exec_node.ks
+            RUN exec_node.
+            SET phase TO "done".
         } ELSE {
             SET phase TO "done".
         }

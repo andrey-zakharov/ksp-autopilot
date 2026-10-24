@@ -1,6 +1,23 @@
 // exec_node.ks
-// Выполняет следующую маневренную ноду с учетом TWR (split the burn)
-// Использует ALLNODES и динамически дросселирует двигатель
+// Выполняет маневренную ноду: разворот ДО варпа, SAS, проверка курса
+
+FUNCTION clamp {
+    PARAMETER x.
+    PARAMETER lo.
+    PARAMETER hi.
+    IF x < lo { RETURN lo. }
+    IF x > hi { RETURN hi. }
+    RETURN x.
+}
+
+FUNCTION getAlignmentAngle {
+    LOCAL shipVec TO SHIP:FACING:FOREVECTOR.
+    IF n:DELTAV:MAG < 0.01 { RETURN 0. }
+    LOCAL targetVec TO n:DELTAV:NORMALIZED.
+    LOCAL dot TO VDOT(shipVec, targetVec).
+    SET dot TO clamp(dot, -1, 1).
+    RETURN ARCCOS(dot).
+}
 
 CLEARSCREEN.
 PRINT "=== Maneuver Node Execution ===".
@@ -12,44 +29,103 @@ IF ALLNODES:LENGTH = 0 {
 }
 
 SET n TO ALLNODES[0].
+
+IF n:DELTAV:MAG < 0.5 {
+    PRINT "Node dV negligible (" + ROUND(n:DELTAV:MAG, 2) + " m/s). Removing.".
+    REMOVE n.
+    EXIT.
+}
+
 PRINT "Node found. Required dV: " + ROUND(n:DELTAV:MAG, 2) + " m/s".
 
 // Расчет времени горения на основе TWR
-// SHIP:MAXTHRUST в kN, SHIP:MASS в тоннах -> ускорение в м/с^2
 SET accel TO MAX(0.1, SHIP:MAXTHRUST / SHIP:MASS).
 SET burnTime TO n:DELTAV:MAG / accel.
-// Начинаем горение за половину времени + запас на стабилизацию SAS
 SET startBurnETA TO (burnTime / 2) + 5.
 
 PRINT "Estimated burn time: " + ROUND(burnTime, 1) + "s".
 PRINT "Starting burn at T-" + ROUND(startBurnETA, 1) + "s".
 
-// Ускорение времени, если до старта горения далеко
+// ШАГ 1: СРАЗУ поворачиваем ракету на вектор ноды (ДО варпа!)
+LOCK STEERING TO n:DELTAV.
+PRINT "Aligning to burn vector...".
+
+// Ждем выравнивания (угол < 2°) с таймаутом 120 секунд
+SET alignStart TO TIME:SECONDS.
+UNTIL getAlignmentAngle() < 2 OR (TIME:SECONDS - alignStart > 120) OR ALLNODES:LENGTH = 0 {
+    WAIT 0.5.
+}
+
+IF ALLNODES:LENGTH = 0 {
+    PRINT "Node disappeared during alignment. Exiting.".
+    UNLOCK STEERING.
+    EXIT.
+}
+
+IF getAlignmentAngle() >= 2 {
+    PRINT "WARNING: Align timeout (angle=" + ROUND(getAlignmentAngle(), 1) + "deg). Proceeding.".
+} ELSE {
+    PRINT "Aligned (angle=" + ROUND(getAlignmentAngle(), 2) + "deg).".
+}
+
+// ШАГ 2: Варпим только после того, как ракета на курсе
 IF n:ETA > startBurnETA + 30 {
     PRINT "Warping to burn start...".
     SET WARP TO 3.
     WAIT UNTIL n:ETA <= startBurnETA + 30 OR ALLNODES:LENGTH = 0.
     SET WARP TO 0.
+    
+    IF ALLNODES:LENGTH = 0 {
+        PRINT "Node disappeared during warp. Exiting.".
+        UNLOCK STEERING.
+        EXIT.
+    }
+    
+    // После варпа проверяем курс (мог сбиться)
+    IF getAlignmentAngle() >= 2 {
+        PRINT "Re-aligning after warp (angle=" + ROUND(getAlignmentAngle(), 1) + "deg)...".
+        SET alignStart TO TIME:SECONDS.
+        UNTIL getAlignmentAngle() < 2 OR (TIME:SECONDS - alignStart > 60) OR ALLNODES:LENGTH = 0 {
+            WAIT 0.5.
+        }
+    }
 }
 
-// Поворачиваем корабль по вектору ноды
-LOCK STEERING TO n:DELTAV.
-WAIT 1. // Даем SAS время стабилизироваться
+// ШАГ 3: Финальная проверка курса перед горением
+IF ALLNODES:LENGTH = 0 {
+    PRINT "Node disappeared. Exiting.".
+    UNLOCK STEERING.
+    EXIT.
+}
 
-// Начинаем горение, когда ETA <= startBurnETA
+SET alignStart TO TIME:SECONDS.
+UNTIL getAlignmentAngle() < 2 OR (TIME:SECONDS - alignStart > 30) OR ALLNODES:LENGTH = 0 {
+    WAIT 0.1.
+}
+
+IF ALLNODES:LENGTH = 0 {
+    PRINT "Node disappeared. Exiting.".
+    UNLOCK STEERING.
+    EXIT.
+}
+
+IF getAlignmentAngle() >= 2 {
+    PRINT "WARNING: Final angle=" + ROUND(getAlignmentAngle(), 1) + "deg. Proceeding.".
+}
+
+// ШАГ 4: Ждем момента начала горения
 WAIT UNTIL n:ETA <= startBurnETA OR ALLNODES:LENGTH = 0.
 
 IF ALLNODES:LENGTH = 0 {
-    PRINT "Node disappeared (maybe completed manually?). Exiting.".
+    PRINT "Node disappeared. Exiting.".
     UNLOCK STEERING.
     EXIT.
 }
 
 PRINT "Burning...".
 
-// Держим газ, пока остается требуемый dV
+// ШАГ 5: Горение с динамическим дросселированием
 UNTIL ALLNODES:LENGTH = 0 OR n:DELTAV:MAG <= 0.5 {
-    // Динамическое дросселирование в конце для точности
     IF n:DELTAV:MAG > 10 {
         SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 1.
     } ELSE IF n:DELTAV:MAG > 2 {
@@ -62,11 +138,11 @@ UNTIL ALLNODES:LENGTH = 0 OR n:DELTAV:MAG <= 0.5 {
 
 SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
 
-// Удаляем выполненную ноду
 IF ALLNODES:LENGTH > 0 {
     REMOVE n.
     PRINT "Node executed successfully!".
 }
 
 UNLOCK STEERING.
-LOCK STEERING TO PROGRADE.
+// Включаем SAS для стабилизации
+SET SAS TO TRUE.
