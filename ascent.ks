@@ -5,12 +5,15 @@ PARAMETER targetPeriapsis IS -1.
 PARAMETER launchHeading IS 90.
 PARAMETER maxQ IS 25000.
 PARAMETER turnStartAlt IS 250.
-PARAMETER turnEndAlt IS 45000.
+// PARAMETER turnEndAlt IS 55000.
 PARAMETER autoStage IS TRUE.
 PARAMETER stageDelay IS 2.
 PARAMETER insertionMargin IS 2000.
 PARAMETER orbitTolerance IS 500.
 PARAMETER fineTuneApoapsis IS TRUE.
+
+// Подключаем общие утилиты
+RUN utils.
 
 IF targetPeriapsis < 0 {
     SET targetPeriapsis TO targetApoapsis.
@@ -24,48 +27,14 @@ IF insertionMargin < 0 {
 
 SET ascentAp TO targetApoapsis + insertionMargin.
 
-FUNCTION clamp {
-    PARAMETER x.
-    PARAMETER lo.
-    PARAMETER hi.
-    IF x < lo { RETURN lo. }
-    IF x > hi { RETURN hi. }
-    RETURN x.
+// Динамический расчёт конца гравитационного поворота на основе атмосферы
+SET turnEndAlt TO calcTurnEndAlt().
+
+// Защита от слишком короткого профиля поворота (минимум 5 км на поворот)
+IF turnEndAlt - turnStartAlt < 5000 {
+    SET turnEndAlt TO turnStartAlt + 5000.
 }
 
-FUNCTION atmPressure {
-    PARAMETER altit.
-    IF NOT BODY:ATM:EXISTS { RETURN 0. }
-    LOCAL p IS BODY:ATM:ALTITUDEPRESSURE(altit).
-    RETURN MAX(0, p).
-}
-
-FUNCTION atmDensity {
-    PARAMETER altit.
-    IF NOT BODY:ATM:EXISTS { RETURN 0. }
-    // ИСПРАВЛЕНИЕ: 1 atm = 101325 Pa
-    LOCAL pPa IS atmPressure(altit) * 101325.
-    IF pPa <= 0 { RETURN 0. }
-    LOCAL temp IS 288.15 - 0.0065 * altit.
-    IF temp < 216.65 { SET temp TO 216.65. }
-    RETURN pPa / (287.05 * temp).
-}
-
-FUNCTION dynPressure {
-    PARAMETER altit.
-    PARAMETER veloc.
-    IF NOT BODY:ATM:EXISTS { RETURN 0. }
-    LOCAL rho IS atmDensity(altit).
-    RETURN 0.5 * rho * veloc * veloc.
-}
-
-FUNCTION vectorPitch {
-    PARAMETER vec.
-    IF vec:MAG < 0.1 { RETURN 90. }
-    LOCAL sinGamma IS VDOT(vec, SHIP:UP:FOREVECTOR) / vec:MAG.
-    SET sinGamma TO clamp(sinGamma, -1, 1).
-    RETURN ARCSIN(sinGamma).
-}
 
 FUNCTION stageHasUsablePropellant {
     LOCAL resList IS STAGE:RESOURCES.
@@ -120,6 +89,31 @@ FUNCTION shouldStage {
     IF SHIP:MAXTHRUST <= 0.01 { RETURN TRUE. }
     IF NOT stageHasUsablePropellant() { RETURN TRUE. }
     RETURN FALSE.
+}
+
+FUNCTION calcTurnEndAlt {
+    // Для тел БЕЗ атмосферы: летим вертикально до 10 км.
+    // Самая высокая гора в KSP — на Муне (~6500 м), Айке (~6000 м), Минмусе (~5000 м).
+    // 10 км — гарантированно выше любого рельефа.
+    IF NOT BODY:ATM:EXISTS { 
+        RETURN 10000.
+    }
+    
+    // Для тел С атмосферой: ищем высоту, где давление падает до 0.005 атм (~0.5 кПа).
+    // При таком давлении драг на орбитальных скоростях пренебрежимо мал.
+    SET maxAlt TO BODY:ATM:HEIGHT.
+    SET targetPressure TO 0.005.
+    SET h TO 0.
+    SET step TO 1000.
+    
+    UNTIL h >= maxAlt {
+        IF BODY:ATM:ALTITUDEPRESSURE(h) <= targetPressure {
+            RETURN h.
+        }
+        SET h TO h + step.
+    }
+    
+    RETURN maxAlt.
 }
 
 CLEARSCREEN.
@@ -177,7 +171,17 @@ UNTIL phase = "done" {
     }
     
     IF phase = "ascent" {
-        SET readyForCoast TO (relAlt > turnEndAlt * 0.6) OR (horizSpeed > 0.8 * vOrbNow) OR (ABS(vertSpeed) < 30).
+        // Коастим, если:
+        // - высота > 60% от конца гравити-тёрна
+        // - горизонтальная скорость > 80% орбитальной
+        // - вертикальная скорость мала
+        // - апоцентр уже выше атмосферы (можно добирать скорость в вакууме)
+        // - вертикальная скорость отрицательная (ракета начинает падать)
+        SET readyForCoast TO (relAlt > turnEndAlt * 0.8)
+            OR (horizSpeed > 0.85 * vOrbNow)
+            OR (ABS(vertSpeed) < 20)
+            OR (ap > BODY:ATM:HEIGHT)
+            OR (vertSpeed < -30).
         
         IF pe >= targetPeriapsis - 100 AND ap <= targetApoapsis + orbitTolerance {
             SET throttleSet TO 0.
@@ -190,6 +194,10 @@ UNTIL phase = "done" {
             IF dynPres > maxQ {
                 SET throttleSet TO clamp(maxQ / dynPres, 0.05, 1).
             }
+            // Дополнительная защита: если скорость слишком высока для текущей высоты
+            IF pressure > 0.001 AND speed > vOrbNow * 0.95 {
+                SET throttleSet TO MIN(throttleSet, 0.7).
+            }
             
             IF relAlt < turnStartAlt {
                 SET targetPitch TO 90.
@@ -199,8 +207,14 @@ UNTIL phase = "done" {
                 SET pitchAlt TO 90 - 90 * altFrac.
                 SET pitchVel TO 90 - 90 * vFrac.
                 SET targetPitch TO MIN(pitchAlt, pitchVel).
-                IF pressure > 5 { SET targetPitch TO MAX(targetPitch, 8). }
-                
+                // Если ракета теряет вертикальную скорость в атмосфере — опускаем нос
+                // Мягкая защита: только при существенном падении
+                IF vertSpeed < -20 AND pressure > 0.01 {
+                    SET targetPitch TO MIN(targetPitch, 10).
+                }
+                // pressure в атмосферах! 1 атм = 101.325 кПа
+                // 0.05 атм ≈ 5 кПа — граница плотной атмосферы
+                IF pressure > 0.05 { SET targetPitch TO MAX(targetPitch, 8). }
                 SET proPitch TO vectorPitch(SHIP:SRFPROGRADE:VECTOR).
                 SET aoaLimit TO 20.
                 IF dynPres > maxQ * 0.5 { SET aoaLimit TO 6. }
@@ -265,6 +279,7 @@ UNTIL phase = "done" {
         PRINT "Horizontal: " + ROUND(horizSpeed) + " m/s".
         PRINT "Q approx:   " + ROUND(dynPres / 1000) + " kPa".
         PRINT "Pressure:   " + ROUND(pressure * 101.325) + " kPa".
+        PRINT "Turn End:   " + ROUND(turnEndAlt) + " m".
         PRINT "Pitch cmd:  " + ROUND(steerPitch) + " deg".
         PRINT "Throttle:   " + ROUND(throttleSet * 100) + "%".
         SET nextPrint TO now + 1.

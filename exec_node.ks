@@ -1,14 +1,6 @@
 // exec_node.ks
 // Выполняет маневренную ноду: разворот ДО варпа, SAS, проверка курса
-
-FUNCTION clamp {
-    PARAMETER x.
-    PARAMETER lo.
-    PARAMETER hi.
-    IF x < lo { RETURN lo. }
-    IF x > hi { RETURN hi. }
-    RETURN x.
-}
+RUN utils.
 
 FUNCTION getAlignmentAngle {
     LOCAL shipVec TO SHIP:FACING:FOREVECTOR.
