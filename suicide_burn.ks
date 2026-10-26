@@ -1,109 +1,111 @@
-// ==========================================================================
-// suicide_burn.ks — suicide burn с регуляцией тяги и наклоном <= 5°
-// ==========================================================================
-// Использует глобальные переменные из land.ks:
-//   vVert, vHoriz, vHorizMag, altAGL, upDir, gNow, aThrust, vSafe,
-//   maxTiltRad, currentWarp, throttleSet, landingPhase, inSuicideBurn
-//
-// Устанавливает:
-//   suicideDone = TRUE когда altAGL <= 100
-//   suicideFailed = TRUE если ракета улетает вверх (vVert > 0 и altAGL > 1500)
-// ==========================================================================
+PARAMETER exitAlt IS 100.
+PARAMETER exitSpeed IS 10.
+PARAMETER maxTiltDeg IS 8.
+PARAMETER touchdownSpeed IS 0.
+PARAMETER maxIgniteTiltDeg IS 15.
+PARAMETER slewDeg IS 10.
 
-SET suicideDone TO FALSE.
-SET suicideFailed TO FALSE.
-SET smoothTargetDir TO V(0, 1, 0).
-SET dirInitialized TO FALSE.
+RUN utils.
 
-UNTIL suicideDone OR suicideFailed {
-    // Пересчитываем параметры каждый кадр
-    SET altAGL TO SHIP:ALTITUDE - SHIP:GEOPOSITION:TERRAINHEIGHT.
-    IF altAGL < 0 { SET altAGL TO 0. }
-    
-    SET upDir TO SHIP:UP:FOREVECTOR.
-    SET vSurf TO SHIP:VELOCITY:SURFACE.
-    SET vVert TO VDOT(vSurf, upDir).
-    SET vHoriz TO vSurf - (vVert * upDir).
-    SET vHorizMag TO vHoriz:MAG.
-    SET vVertAbs TO ABS(vVert).
-    
-    SET gNow TO safeDiv(BODY:MU, (BODY:RADIUS + SHIP:ALTITUDE)^2, 0.01).
-    SET thrustNow TO SHIP:AVAILABLETHRUST.
-    IF thrustNow <= 0.01 { SET thrustNow TO SHIP:MAXTHRUST. }
-    SET massNow TO MAX(0.001, SHIP:MASS).
-    SET aThrust TO MAX(0.1, thrustNow / massNow).
-    SET aNet TO MAX(0.1, aThrust - gNow).
-    SET twrNow TO aThrust / MAX(0.01, gNow).
-    
-    SET vSafe TO SQRT(2 * aNet * MAX(1, altAGL)).
-    
-    // Проверка завершения
-    IF altAGL <= 100 {
-        SET suicideDone TO TRUE.
-        BREAK.
-    }
-    
-    // Проверка улёта вверх
-    IF vVert > 0 AND altAGL > 1500 {
-        PRINT "  [!] Ракета улетает вверх (vVert=" + ROUND(vVert,1) + "), перехожу в coast".
-        SET suicideFailed TO TRUE.
-        BREAK.
-    }
-    
-    // Установка фазы
-    SET landingPhase TO "suicide".
-    SET inSuicideBurn TO TRUE.
-    
-    // Управление тягой
-    LOCK THROTTLE TO throttleSet.
-    SET SAS TO FALSE.
-    
-    // Выход из варпа если был
-    IF currentWarp > 0 {
-        SET WARP TO 0.
-        WAIT 0.5.
-        SET currentWarp TO 0.
-    }
-    
-    // Направление тяги: вертикально с наклоном <= 5° против vHoriz
-    SET maxTiltRad TO 5 * CONSTANT:PI / 180.  // Максимум 5°
-    
-    IF vHorizMag > 0.5 {
-        SET antiHorizDir TO (-1) * vHoriz:NORMALIZED.
-        // Наклон пропорционален vHoriz, но не больше 5°
-        SET tiltFactor TO MIN(maxTiltRad, vHorizMag / 30).
-        SET rawTargetDir TO (COS(tiltFactor) * upDir + SIN(tiltFactor) * antiHorizDir):NORMALIZED.
+SET sbThrottle TO 0.
+SET sbSteer TO SHIP:FACING.
+SET sbDiagTimer TO 0.
+
+LOCK THROTTLE TO sbThrottle.
+LOCK STEERING TO sbSteer.
+
+SET sbLastSec TO TIME:SECONDS.
+SET sbAlt TO MAX(0, SHIP:ALTITUDE - SHIP:GEOPOSITION:TERRAINHEIGHT).
+SET sbVVert TO VDOT(SHIP:VELOCITY:SURFACE, SHIP:UP:FOREVECTOR).
+
+UNTIL SHIP:STATUS = "LANDED" OR
+      SHIP:STATUS = "SPLASHED" OR
+      sbAlt <= 20 OR
+      (sbAlt <= exitAlt AND ABS(sbVVert) <= MAX(10, exitSpeed * 2)) {
+
+    SET sbNow TO TIME:SECONDS.
+    SET sbDt TO clamp(sbNow - sbLastSec, 0.01, 0.25).
+    SET sbLastSec TO sbNow.
+
+    SET sbAlt TO MAX(0, SHIP:ALTITUDE - SHIP:GEOPOSITION:TERRAINHEIGHT).
+    SET sbUp TO SHIP:UP:FOREVECTOR.
+
+    SET sbVel TO SHIP:VELOCITY:SURFACE.
+    SET sbVVert TO VDOT(sbVel, sbUp).
+    SET sbVHoriz TO sbVel - (sbVVert * sbUp).
+    SET sbVHorizMag TO sbVHoriz:MAG.
+    SET sbVVertAbs TO ABS(sbVVert).
+
+    SET sbThrust TO SHIP:AVAILABLETHRUST.
+    IF sbThrust <= 0.01 { SET sbThrust TO SHIP:MAXTHRUST. }
+
+    SET sbMass TO MAX(0.001, SHIP:MASS).
+    SET sbAcc TO MAX(0.01, sbThrust / sbMass).
+    SET sbG TO safeDiv(BODY:MU, (BODY:RADIUS + SHIP:ALTITUDE)^2, 0.01).
+
+    SET sbTiltDeg TO 0.
+
+    IF sbVHorizMag > 0.1 {
+        SET sbTiltDeg TO MIN(maxTiltDeg, sbVHorizMag * 1.0).
+        SET sbAnti TO (-1) * sbVHoriz:NORMALIZED.
+        SET sbDesired TO (COS(sbTiltDeg) * sbUp + SIN(sbTiltDeg) * sbAnti):NORMALIZED.
     } ELSE {
-        SET rawTargetDir TO upDir.
+        SET sbDesired TO sbUp.
     }
-    
-    // Сглаживание направления
-    IF NOT dirInitialized {
-        SET smoothTargetDir TO rawTargetDir.
-        SET dirInitialized TO TRUE.
-    } ELSE {
-        SET alpha TO 0.1.
-        SET smoothTargetDir TO ((1 - alpha) * smoothTargetDir + alpha * rawTargetDir):NORMALIZED.
+
+    SET sbVertFrac TO MAX(0.1, COS(sbTiltDeg)).
+    SET sbNetAvail TO MAX(0.05, sbAcc * sbVertFrac - sbG).
+
+    SET sbTargetMag TO SQRT(
+        MAX(0.01, touchdownSpeed * touchdownSpeed + 2 * sbNetAvail * sbAlt)
+    ).
+
+    SET sbTargetVel TO -sbTargetMag.
+
+    SET sbNetCmd TO 1.2 * (sbTargetVel - sbVVert).
+
+    IF sbVVert < sbTargetVel {
+        SET sbEnergyNet TO (sbVVertAbs * sbVVertAbs - sbTargetMag * sbTargetMag) /
+                           (2 * MAX(1, sbAlt)).
+        SET sbNetCmd TO MAX(sbNetCmd, sbEnergyNet).
     }
-    
-    LOCK STEERING TO LOOKDIRUP(smoothTargetDir, upDir).
-    
-    // Регуляция тяги в зависимости от vVert
-    IF vVert > 0 {
-        // Ракета поднимается — выключаем тягу
-        SET throttleSet TO 0.
-    } ELSE IF vVert > -5 {
-        // Ракета почти остановилась — минимальная тяга (компенсация g)
-        SET throttleSet TO safeDiv(gNow, aThrust, 0.5).
-    } ELSE {
-        // Ракета падает — тормозим до vSafe
-        SET vTargetSuicide TO MIN(vSafe, 20).
-        SET aNeeded TO (vVertAbs*vVertAbs - vTargetSuicide*vTargetSuicide) / (2 * MAX(1, altAGL)) + gNow.
-        SET minThrottle TO safeDiv(gNow, aThrust, 0.1).
-        SET throttleSet TO clamp(aNeeded / MAX(0.1, aThrust), minThrottle, 1).
+
+    SET sbThrustVertAcc TO sbG + sbNetCmd.
+
+    IF sbVVert > 0 AND sbAlt < MAX(50, exitAlt * 1.5) {
+        SET sbThrustVertAcc TO MIN(sbThrustVertAcc, sbG * 0.5).
     }
-    
-    SET throttleSet TO clamp(throttleSet, 0, 1).
-    
+
+    IF sbThrustVertAcc < 0 {
+        SET sbThrustVertAcc TO 0.
+    }
+
+    SET sbThrottle TO thrustGate(
+        clamp(sbThrustVertAcc / MAX(0.1, sbAcc * sbVertFrac), 0, 1),
+        sbDesired,
+        maxIgniteTiltDeg
+    ).
+
+    SET sbThrottle TO clamp(sbThrottle, 0, 1).
+
+    SET sbSteer TO rotateToward(sbSteer, sbDesired, slewDeg, sbDt).
+
+    IF sbNow >= sbDiagTimer {
+        PRINT "SB alt=" + ROUND(sbAlt) +
+              " vV=" + ROUND(sbVVert,1) +
+              " vT=" + ROUND(sbTargetVel,1) +
+              " vH=" + ROUND(sbVHorizMag,1) +
+              " tilt=" + ROUND(VANG(SHIP:FACING:FOREVECTOR, sbUp),1) +
+              " thr=" + ROUND(sbThrottle * 100) + "%".
+        SET sbDiagTimer TO sbNow + 2.
+    }
+
     WAIT 0.
 }
+
+SET sbThrottle TO 0.
+WAIT 0.05.
+
+UNLOCK THROTTLE.
+UNLOCK STEERING.
+SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.

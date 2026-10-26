@@ -36,61 +36,6 @@ IF turnEndAlt - turnStartAlt < 5000 {
 }
 
 
-FUNCTION stageHasUsablePropellant {
-    LOCAL resList IS STAGE:RESOURCES.
-    LOCAL lf TO 0.
-    LOCAL ox TO 0.
-    LOCAL sf TO 0.
-    LOCAL mp TO 0.
-    LOCAL xn TO 0.
-    LOCAL hasLF TO FALSE.
-    LOCAL hasOx TO FALSE.
-    LOCAL hasSolid TO FALSE.
-    LOCAL hasAir TO FALSE.
-    LOCAL hasProp TO FALSE.
-    FOR r IN resList {
-        IF r:CAPACITY > 0.1 {
-            IF r:NAME = "LiquidFuel" {
-                SET hasLF TO TRUE.
-                SET hasProp TO TRUE.
-                SET lf TO lf + r:AMOUNT.
-            } ELSE IF r:NAME = "Oxidizer" {
-                SET hasOx TO TRUE.
-                SET hasProp TO TRUE.
-                SET ox TO ox + r:AMOUNT.
-            } ELSE IF r:NAME = "SolidFuel" {
-                SET hasSolid TO TRUE.
-                SET hasProp TO TRUE.
-                SET sf TO sf + r:AMOUNT.
-            } ELSE IF r:NAME = "MonoPropellant" {
-                SET hasProp TO TRUE.
-                SET mp TO mp + r:AMOUNT.
-            } ELSE IF r:NAME = "XenonGas" {
-                SET hasProp TO TRUE.
-                SET xn TO xn + r:AMOUNT.
-            } ELSE IF r:NAME = "IntakeAir" {
-                SET hasAir TO TRUE.
-            }
-        }
-    }
-    IF NOT hasProp { RETURN TRUE. }
-    IF hasSolid AND sf <= 0.1 { RETURN FALSE. }
-    IF hasLF AND hasOx {
-        IF lf > 0.1 AND ox > 0.1 { RETURN TRUE. }
-        IF lf > 0.1 AND hasAir { RETURN TRUE. }
-        RETURN FALSE.
-    }
-    IF hasLF { RETURN lf > 0.1. }
-    IF mp > 0.1 OR xn > 0.1 { RETURN TRUE. }
-    RETURN FALSE.
-}
-
-FUNCTION shouldStage {
-    IF SHIP:MAXTHRUST <= 0.01 { RETURN TRUE. }
-    IF NOT stageHasUsablePropellant() { RETURN TRUE. }
-    RETURN FALSE.
-}
-
 FUNCTION calcTurnEndAlt {
     // Для тел БЕЗ атмосферы: летим вертикально до 10 км.
     // Самая высокая гора в KSP — на Муне (~6500 м), Айке (~6000 м), Минмусе (~5000 м).
