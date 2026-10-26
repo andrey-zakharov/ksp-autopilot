@@ -1,5 +1,6 @@
 // exec_node.ks
 RUN utils.
+SAS OFF.
 
 FUNCTION getAlignmentAngle { PARAMETER nd.
     LOCAL shipVec TO SHIP:FACING:FOREVECTOR.
@@ -124,4 +125,4 @@ IF ALLNODES:LENGTH > 0 {
 }
 
 UNLOCK STEERING.
-// SAS НЕ включаем, чтобы не конфликтовать с последующим LOCK STEERING
+SAS ON.

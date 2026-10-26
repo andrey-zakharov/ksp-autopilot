@@ -1,9 +1,12 @@
+//@LAZYGLOBAL OFF.
+
 PARAMETER exitAlt IS 100.
 PARAMETER exitSpeed IS 10.
 PARAMETER maxTiltDeg IS 8.
 PARAMETER touchdownSpeed IS 0.
 PARAMETER maxIgniteTiltDeg IS 15.
 PARAMETER slewDeg IS 10.
+PARAMETER clearance IS 20. // Безопасный запас от земли
 
 RUN utils.
 
@@ -20,8 +23,7 @@ SET sbVVert TO VDOT(SHIP:VELOCITY:SURFACE, SHIP:UP:FOREVECTOR).
 
 UNTIL SHIP:STATUS = "LANDED" OR
       SHIP:STATUS = "SPLASHED" OR
-      sbAlt <= 20 OR
-      (sbAlt <= exitAlt AND ABS(sbVVert) <= MAX(10, exitSpeed * 2)) {
+      ABS(sbVVert) <= exitSpeed {
 
     SET sbNow TO TIME:SECONDS.
     SET sbDt TO clamp(sbNow - sbLastSec, 0.01, 0.25).
@@ -45,6 +47,7 @@ UNTIL SHIP:STATUS = "LANDED" OR
 
     SET sbTiltDeg TO 0.
 
+    // Небольшой наклон только для гашения остаточной горизонтали
     IF sbVHorizMag > 0.1 {
         SET sbTiltDeg TO MIN(maxTiltDeg, sbVHorizMag * 1.0).
         SET sbAnti TO (-1) * sbVHoriz:NORMALIZED.
@@ -56,8 +59,12 @@ UNTIL SHIP:STATUS = "LANDED" OR
     SET sbVertFrac TO MAX(0.1, COS(sbTiltDeg)).
     SET sbNetAvail TO MAX(0.05, sbAcc * sbVertFrac - sbG).
 
+    // Цель — остановиться у поверхности до touchdownSpeed
+    // Но расчет ведем от высоты 'clearance', чтобы не удариться
+    LOCAL effectiveAlt TO MAX(0.1, sbAlt - clearance).
+    
     SET sbTargetMag TO SQRT(
-        MAX(0.01, touchdownSpeed * touchdownSpeed + 2 * sbNetAvail * sbAlt)
+        MAX(0.01, touchdownSpeed * touchdownSpeed + 2 * sbNetAvail * effectiveAlt)
     ).
 
     SET sbTargetVel TO -sbTargetMag.
@@ -66,7 +73,7 @@ UNTIL SHIP:STATUS = "LANDED" OR
 
     IF sbVVert < sbTargetVel {
         SET sbEnergyNet TO (sbVVertAbs * sbVVertAbs - sbTargetMag * sbTargetMag) /
-                           (2 * MAX(1, sbAlt)).
+                           (2 * MAX(1, effectiveAlt)).
         SET sbNetCmd TO MAX(sbNetCmd, sbEnergyNet).
     }
 
@@ -92,6 +99,7 @@ UNTIL SHIP:STATUS = "LANDED" OR
 
     IF sbNow >= sbDiagTimer {
         PRINT "SB alt=" + ROUND(sbAlt) +
+              " clr=" + ROUND(clearance) +
               " vV=" + ROUND(sbVVert,1) +
               " vT=" + ROUND(sbTargetVel,1) +
               " vH=" + ROUND(sbVHorizMag,1) +
