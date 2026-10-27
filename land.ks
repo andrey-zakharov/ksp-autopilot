@@ -77,6 +77,8 @@ SET nextDiagTimer TO 0.
 // Переменные для PD-регулятора горизонтали
 SET prevHorizErr TO 0.
 SET currentHorizAccel TO 0.
+// Предел отклонения в градусах, при котором тяга полностью отсекается
+SET max_angle_error TO 5.0. 
 
 // ==========================================================================
 //  ФУНКЦИИ РАСЧЁТА
@@ -410,6 +412,9 @@ UNTIL isLanded {
 
         // Плавный разворот
         SET steerFacing TO rotateToward(steerFacing, desiredDir, maxSlewDeg, dtSec).
+
+        // Динамическое управление тягой
+        SET throttleCmd TO throttleCmd * MAX(0, 1 - (VANG(SHIP:FACING:VECTOR, steerFacing:VECTOR) / max_angle_error)).
 
         IF currentWarp > 0 {
             SET WARP TO 0.

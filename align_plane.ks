@@ -48,7 +48,7 @@ FUNCTION findNode { PARAMETER nTgt. PARAMETER pAxis. PARAMETER qAxis.
     RETURN anyB. }
 
 FUNCTION executeNode { PARAMETER steerTolDeg. PARAMETER warpLvl.
-    // SET SAS TO TRUE.
+    SAS OFF.
     LOCK STEERING TO activeNode:DELTAV.
     LOCAL maxAcc TO MAX(0.01, SHIP:MAXTHRUST / SHIP:MASS).
     LOCAL burnTime TO activeNode:DELTAV:MAG / maxAcc.
