@@ -7,111 +7,146 @@ PARAMETER maxTiltDeg IS 8.
 PARAMETER touchdownSpeed IS 0.
 PARAMETER maxIgniteTiltDeg IS 15.
 PARAMETER slewDeg IS 10.
-PARAMETER clearance IS 3. // Безопасный запас от земли (метры)
+PARAMETER clearance IS 30. // Безопасный запас от земли, метры
 
 RUN utils.
 
-SET sbThrottle TO 0.
-SET sbSteer TO SHIP:FACING.
-SET sbDiagTimer TO 0.
+GLOBAL sbThrottle IS 0.
+GLOBAL sbSteer IS SHIP:FACING.
+GLOBAL sbDiagTimer IS 0.
+GLOBAL sbPrevVVert IS 0.
+GLOBAL sbAccMeas IS 0.
+GLOBAL sbLastSec IS TIME:SECONDS.
+GLOBAL sbAlt IS MAX(0, SHIP:ALTITUDE - SHIP:GEOPOSITION:TERRAINHEIGHT).
+GLOBAL sbVVert IS VDOT(SHIP:VELOCITY:SURFACE, SHIP:UP:FOREVECTOR).
+
+SET sbPrevVVert TO sbVVert.
 
 LOCK THROTTLE TO sbThrottle.
 LOCK STEERING TO sbSteer.
 
-SET sbLastSec TO TIME:SECONDS.
-SET sbAlt TO MAX(0, SHIP:ALTITUDE - SHIP:GEOPOSITION:TERRAINHEIGHT).
-SET sbVVert TO VDOT(SHIP:VELOCITY:SURFACE, SHIP:UP:FOREVECTOR).
-
 UNTIL SHIP:STATUS = "LANDED" OR
       SHIP:STATUS = "SPLASHED" OR
-      sbAlt <= clearance OR 
-      (sbAlt <= exitAlt AND ABS(sbVVert) <= MAX(10, exitSpeed * 2)) {
+      (sbAlt <= exitAlt AND ABS(sbVVert) <= MAX(exitSpeed, 5)) OR
+      sbAlt <= 1.0 {
 
     SET sbNow TO TIME:SECONDS.
     SET sbDt TO clamp(sbNow - sbLastSec, 0.01, 0.25).
     SET sbLastSec TO sbNow.
 
     SET sbAlt TO MAX(0, SHIP:ALTITUDE - SHIP:GEOPOSITION:TERRAINHEIGHT).
-    SET sbUp TO SHIP:UP:FOREVECTOR.
 
-    SET sbVel TO SHIP:VELOCITY:SURFACE.
+    LOCAL sbUp IS SHIP:UP:FOREVECTOR.
+    LOCAL sbVel IS SHIP:VELOCITY:SURFACE.
+
     SET sbVVert TO VDOT(sbVel, sbUp).
-    SET sbVHoriz TO sbVel - (sbVVert * sbUp).
-    SET sbVHorizMag TO sbVHoriz:MAG.
-    SET sbVVertAbs TO ABS(sbVVert).
 
-    SET sbThrust TO SHIP:AVAILABLETHRUST.
-    IF sbThrust <= 0.01 { SET sbThrust TO SHIP:MAXTHRUST. }
+    LOCAL sbVHoriz IS sbVel - (sbVVert * sbUp).
+    LOCAL sbVHorizMag IS sbVHoriz:MAG.
+    LOCAL sbVVertAbs IS ABS(sbVVert).
 
-    SET sbMass TO MAX(0.001, SHIP:MASS).
-    SET sbAcc TO MAX(0.01, sbThrust / sbMass).
-    SET sbG TO safeDiv(BODY:MU, (BODY:RADIUS + SHIP:ALTITUDE)^2, 0.01).
+    LOCAL sbMass IS MAX(0.001, SHIP:MASS).
 
-    SET sbTiltDeg TO 0.
-    
-    // Небольшой наклон только для гашения остаточной горизонтали
+    // Для управления используем МАКСИМАЛЬНУЮ тягу, а не текущую доступную.
+    // AVAILABLETHRUST может зависеть от текущего дросселя и давать заниженную оценку.
+    LOCAL sbMaxThrust IS SHIP:MAXTHRUST.
+    IF sbMaxThrust <= 0.01 {
+        SET sbMaxThrust TO SHIP:AVAILABLETHRUST.
+    }
+
+    LOCAL sbMaxAcc IS MAX(0.01, sbMaxThrust / sbMass).
+    LOCAL sbG IS safeDiv(BODY:MU, (BODY:RADIUS + SHIP:ALTITUDE)^2, 0.01).
+
+    // Наклон только для гашения остаточной горизонтали.
+    // При низком TWR не наклоняемся сильно.
+    LOCAL sbTiltDeg IS 0.
+    LOCAL sbDesired IS sbUp.
+    LOCAL sbAnti IS V(0,0,0).
+
     IF sbVHorizMag > 0.1 {
-        SET sbTiltDeg TO MIN(maxTiltDeg, sbVHorizMag * 1.0).
+        SET sbTiltDeg TO MIN(maxTiltDeg, sbVHorizMag * 0.5).
         SET sbAnti TO (-1) * sbVHoriz:NORMALIZED.
         SET sbDesired TO (COS(sbTiltDeg) * sbUp + SIN(sbTiltDeg) * sbAnti):NORMALIZED.
-    } ELSE {
-        SET sbDesired TO sbUp.
     }
 
-    SET sbVertFrac TO MAX(0.1, COS(sbTiltDeg)).
-    SET sbNetAvail TO MAX(0.05, sbAcc * sbVertFrac - sbG).
+    LOCAL sbVertFrac IS MAX(0.1, COS(sbTiltDeg)).
 
-    // Эффективная высота для торможения (до точки касания шасси)
-    LOCAL effectiveAlt TO MAX(0.1, sbAlt - clearance).
-    
-    // Максимальная скорость, которую можно погасить за оставшуюся дистанцию
-    LOCAL maxAllowedSpeed TO SQRT(MAX(0.01, 2 * sbNetAvail * effectiveAlt)).
-    
-    SET sbThrottle TO 0.
+    // Максимальное чистое вертикальное торможение вниз, которое мы можем дать.
+    LOCAL sbNetMax IS MAX(0.01, sbMaxAcc * sbVertFrac - sbG).
 
-    // Логика управления тягой
-    IF sbVVertAbs > maxAllowedSpeed {
-        // Если скорость слишком велика для остановки на этой высоте — полное торможение
-        SET sbThrottle TO 1.0.
-    } ELSE {
-        // Иначе плавное торможение к нулю на высоте clearance
-        // Требуемое замедление для остановки за remaining distance
-        LOCAL reqDecel TO (sbVVertAbs * sbVVertAbs) / (2 * MAX(0.1, effectiveAlt)).
-        
-        // Добавляем коэффициент запаса (1.2), чтобы гарантированно остановиться раньше
-        LOCAL targetDecel TO reqDecel * 1.2.
-        
-        // Переводим требуемое замедление в ускорение двигателя
-        // a_thrust_vert = g + targetDecel
-        LOCAL thrustVertAcc TO sbG + targetDecel.
-        
-        // Ограничиваем тягу
-        SET sbThrottle TO clamp(thrustVertAcc / MAX(0.1, sbAcc * sbVertFrac), 0, 1).
+    // Высота, которую реально можно использовать для торможения.
+    LOCAL sbEffAlt IS MAX(0.1, sbAlt - clearance).
+
+    // Остановочный путь при максимальной тяге.
+    LOCAL sbStopDist IS (sbVVertAbs * sbVVertAbs - touchdownSpeed * touchdownSpeed) /
+                        (2 * sbNetMax).
+    IF sbStopDist < 0 {
+        SET sbStopDist TO 0.
     }
 
-    // Защита от взлета вверх у самой поверхности
+    // Фактическое ускорение по изменению вертикальной скорости.
+    // vVert отрицательный при падении. Если он становится менее отрицательным — тормозим вверх.
+    SET sbAccMeas TO 0.
+    IF sbDt > 0.01 {
+        SET sbAccMeas TO (sbVVert - sbPrevVVert) / sbDt.
+    }
+    SET sbPrevVVert TO sbVVert.
+
+    // По умолчанию — аварийное полное торможение.
+    SET sbThrottle TO 1.0.
+
+    // Если запас высоты есть, можно попробовать более плавный режим.
+    // Но если фактическое торможение хуже нужного — сразу возвращаем 100%.
+    IF sbEffAlt > sbStopDist * 1.15 + sbVVertAbs * 0.35 {
+
+        LOCAL sbReqDecel IS (sbVVertAbs * sbVVertAbs - touchdownSpeed * touchdownSpeed) /
+                            (2 * sbEffAlt).
+        IF sbReqDecel < 0 {
+            SET sbReqDecel TO 0.
+        }
+
+        // Небольшой запас, чтобы не прилететь точно в ноль высоты с остаточной скоростью.
+        LOCAL sbTargetDecel IS sbReqDecel * 1.10.
+
+        LOCAL sbDesiredAccel IS sbG + sbTargetDecel.
+
+        SET sbThrottle TO clamp(
+            sbDesiredAccel / MAX(0.01, sbMaxAcc * sbVertFrac),
+            0,
+            1
+        ).
+
+        // Если реальное ускорение заметно хуже расчетного — форсируем полную тягу.
+        IF sbAccMeas < sbTargetDecel * 0.65 {
+            SET sbThrottle TO 1.0.
+        }
+    }
+
+    // У самой земли не даем ракете уйти вверх.
     IF sbVVert > 0 AND sbAlt < MAX(50, exitAlt * 1.5) {
-        SET sbThrottle TO MIN(sbThrottle, 0.5).
+        LOCAL hoverThr IS safeDiv(sbG, MAX(0.01, sbMaxAcc * sbVertFrac), 0.25).
+        SET sbThrottle TO MIN(sbThrottle, hoverThr).
     }
 
-    // Гейт ориентации
+    // Гейт ориентации.
     SET sbThrottle TO thrustGate(sbThrottle, sbDesired, maxIgniteTiltDeg).
     SET sbThrottle TO clamp(sbThrottle, 0, 1).
 
-    // Плавный разворот
+    // Поворот команды.
     SET sbSteer TO rotateToward(sbSteer, sbDesired, slewDeg, sbDt).
 
-    // Диагностика
+    // Диагностика.
     IF sbNow >= sbDiagTimer {
         PRINT "SB alt=" + ROUND(sbAlt) +
-              " clr=" + ROUND(clearance) +
-              " effH=" + ROUND(effectiveAlt) +
+              " eff=" + ROUND(sbEffAlt) +
+              " stop=" + ROUND(sbStopDist) +
               " vV=" + ROUND(sbVVert,1) +
-              " maxV=" + ROUND(maxAllowedSpeed,1) +
+              " aM=" + ROUND(sbAccMeas,2) +
+              " netMax=" + ROUND(sbNetMax,2) +
               " vH=" + ROUND(sbVHorizMag,1) +
               " tilt=" + ROUND(VANG(SHIP:FACING:FOREVECTOR, sbUp),1) +
               " thr=" + ROUND(sbThrottle * 100) + "%".
-        SET sbDiagTimer TO sbNow + 2.
+        SET sbDiagTimer TO sbNow + 1.
     }
 
     WAIT 0.

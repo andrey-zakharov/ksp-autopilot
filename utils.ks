@@ -39,23 +39,6 @@ FUNCTION vecYaw { PARAMETER directionVec.
     RETURN vectorYaw(directionVec).
 }
 
-FUNCTION rotateToward { PARAMETER currentRot. PARAMETER wantVec. PARAMETER rateDeg. PARAMETER dtSec.
-    IF wantVec:MAG < 0.000001 { RETURN currentRot. }
-
-    LOCAL curVec TO currentRot:FOREVECTOR.
-    LOCAL wantN TO wantVec:NORMALIZED.
-    LOCAL angErr TO VANG(curVec, wantN).
-
-    IF angErr <= 0.05 { RETURN currentRot. }
-
-    LOCAL rotAxis TO VCRS(curVec, wantN).
-    IF rotAxis:MAG < 0.000001 { RETURN currentRot. }
-
-    SET rotAxis TO rotAxis:NORMALIZED.
-
-    LOCAL stepDeg TO MIN(angErr, MAX(0.01, rateDeg * dtSec)).
-    RETURN ANGLEAXIS(stepDeg, rotAxis) * currentRot.
-}
 
 FUNCTION thrustGate { PARAMETER desired. PARAMETER wantVec. PARAMETER maxErrDeg.
     IF wantVec:MAG < 0.000001 { RETURN desired. }
@@ -171,4 +154,38 @@ FUNCTION pidThrottle { PARAMETER targetAccel. PARAMETER currentAccel. PARAMETER 
     LOCAL output TO kp * error + kd * derivative.
     
     RETURN List(output, error).
+}
+
+
+// Плавный поворот текущего направления к целевому
+FUNCTION rotateToward { PARAMETER currentRot. PARAMETER wantVec. PARAMETER rateDeg. PARAMETER dtSec.
+    IF wantVec:MAG < 0.000001 { RETURN currentRot. }
+
+    LOCAL curVec TO currentRot:FOREVECTOR.
+    LOCAL wantN TO wantVec:NORMALIZED.
+    LOCAL angErr TO VANG(curVec, wantN).
+
+    IF angErr <= 0.05 { RETURN currentRot. }
+
+    LOCAL rotAxis TO VCRS(curVec, wantN).
+    IF rotAxis:MAG < 0.000001 { RETURN currentRot. }
+
+    SET rotAxis TO rotAxis:NORMALIZED.
+
+    LOCAL stepDeg TO MIN(angErr, MAX(0.01, rateDeg * dtSec)).
+    RETURN ANGLEAXIS(stepDeg, rotAxis) * currentRot.
+}
+
+// Расчет времени разворота для деорбита (эвристика)
+// Для тяжелых кораблей нужно больше времени, для легких меньше.
+// Мы используем это для установки ETA ноды, а не для управления рулем.
+FUNCTION estimateTurnTime { PARAMETER angleDeg. PARAMETER massKg.
+    // Базовая скорость ~20 deg/s для легкой ракеты (<5 тонн)
+    // Замедляется линейно с массой до ~5 deg/s для тяжелой (>50 тонн)
+    LOCAL baseRate TO 20.
+    LOCAL massFactor TO CLAMP(massKg / 50000, 0.25, 1.0). // 1.0 для 50кг+, 0.25 для 200т+
+    LOCAL estRate TO MAX(5, baseRate * massFactor).
+    
+    // Добавляем запас 2 секунды на инерцию и стабилизацию
+    RETURN (angleDeg / estRate) + 2.
 }
