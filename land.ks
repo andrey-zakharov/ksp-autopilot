@@ -1,9 +1,6 @@
-//@LAZYGLOBAL OFF.
-
 // ==========================================================================
 // land.ks — посадка на безатмосферное тело (kOS 1.6)
 // ==========================================================================
-
 PARAMETER landLat IS 0.
 PARAMETER landLng IS 0.
 PARAMETER maxSlope IS 5.
@@ -14,16 +11,13 @@ PARAMETER finalApproachSpeed IS 10.
 
 // Параметры фазы HORIZONTAL
 PARAMETER horizTol IS 1.           // Порог выхода из фазы (м/с)
-PARAMETER horizDecelTarget IS 5.0.   // Целевое замедление горизонтали (м/с^2)
-PARAMETER horizKp IS 0.8.            // Коэффициент P для регулятора
-PARAMETER horizKd IS 0.2.            // Коэффициент D для регулятора
 
 // Параметры SUICIDE
-PARAMETER suicideTiltDeg IS 8.      // Макс. наклон в суициде
-PARAMETER brakeSafetyMargin IS 1.1. // Запас высоты начала суицида
-PARAMETER brakeLeadTime IS 0.5.     // Время реакции/разворота
+PARAMETER suicideTiltDeg IS 8.      
+PARAMETER brakeSafetyMargin IS 1.1. 
+PARAMETER brakeLeadTime IS 0.5.     
 PARAMETER terrainMargin IS 5.       
-PARAMETER groundClearance IS 3.      // Запас высоты для завершения суицида (метры)
+PARAMETER groundClearance IS 3.     // Запас высоты для завершения суицида (метры)
 
 // Общие параметры
 PARAMETER maxSlewDeg IS 10.         
@@ -73,12 +67,6 @@ SET siteSource TO "MANUAL".
 SET autoLeadSec TO 0.
 SET autoBrakeSec TO 0.
 SET nextDiagTimer TO 0.
-
-// Переменные для PD-регулятора горизонтали
-SET prevHorizErr TO 0.
-SET currentHorizAccel TO 0.
-// Предел отклонения в градусах, при котором тяга полностью отсекается
-SET max_angle_error TO 5.0. 
 
 // ==========================================================================
 //  ФУНКЦИИ РАСЧЁТА
@@ -190,29 +178,23 @@ FUNCTION findBrakingPoint { PARAMETER targetLat. PARAMETER targetLng. PARAMETER 
     RETURN List(bestEta, bestDv, bestErr).
 }
 
-FUNCTION checkStage {
-    // TBD
-}
-
 function printState {
-    // Диагностика каждые 2 секунды
     IF TIME:SECONDS < nextDiagTimer {
         return.
     }
     SET shipHeading TO SHIP:FACING:YAW.
     SET shipPitch TO SHIP:FACING:PITCH.
-    
-    PRINT 
-          " | vV=" + ROUND(velVert, 1) +
-          " | vH=" + ROUND(velHorizMag, 1) +
-          " | tol=" + ROUND(horizTol, 1) +
-          " | AGL=" + ROUND(altAGL) +
-          " | bAlt=" + ROUND(brakeAlt) +
-          " | ttb=" + ROUND(timeToBrake, 1) +
-          " | TWR=" + ROUND(twrNow, 2) +
-          " | hdg=" + ROUND(shipHeading, 0) + "°" +
-          " | pit=" + ROUND(shipPitch, 0) + "°" +
-          " | thr=" + ROUND(throttleCmd * 100) + "%".
+    PRINT
+    " | vV=" + ROUND(velVert, 1) +
+    " | vH=" + ROUND(velHorizMag, 1) +
+    " | tol=" + ROUND(horizTol, 1) +
+    " | AGL=" + ROUND(altAGL) +
+    " | bAlt=" + ROUND(brakeAlt) +
+    " | ttb=" + ROUND(timeToBrake, 1) +
+    " | TWR=" + ROUND(twrNow, 2) +
+    " | hdg=" + ROUND(shipHeading, 0) + "°" +
+    " | pit=" + ROUND(shipPitch, 0) + "°" +
+    " | thr=" + ROUND(throttleCmd * 100) + "%".
     SET nextDiagTimer TO TIME:SECONDS + 2.
 }
 
@@ -254,6 +236,9 @@ PRINT "Цель: " + ROUND(siteLat,5) + "," + ROUND(siteLng,5) +
 
 WAIT 1.
 
+// ==========================================================================
+//  ЭТАП ДЕОРБИТА
+// ==========================================================================
 LOCK isLanded TO SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED".
 
 UNTIL isLanded OR
@@ -262,31 +247,37 @@ UNTIL isLanded OR
       (altAGL < 10000 AND velVert < -5) {
 
     flightState().
-    checkStage().
-
-    UNTIL ALLNODES:LENGTH = 0 {
-        REMOVE ALLNODES[0].
-    }
+    
+    // Удаляем старые ноды
+    UNTIL ALLNODES:LENGTH = 0 { REMOVE ALLNODES[0]. }
     WAIT 0.
 
-    SET nodeEta TO 30. // TBD calc time to rotate rocket
-
+    // Простая логика: гасим ВСЮ орбитальную скорость ретроградно.
+    // Время задержки берем достаточное для разворота ракеты (TWR высокий -> разворот быстрый).
+    // 10 секунд обычно достаточно даже для крупных кораблей с низким TWR.
+    SET nodeEta TO 10.
+    
+    // Если есть авто-лидирование из find_landing_site, можно использовать его, 
+    // но ограничим сверху, чтобы не ждать вечность.
     IF siteSource = "AUTO" AND autoLeadSec > 0 {
-        SET nodeEta TO MAX(10, autoLeadSec - autoBrakeSec / 2).
-    } ELSE {
-        SET brakeInfo TO findBrakingPoint(siteLat, siteLng, siteTerrain).
-        SET nodeEta TO brakeInfo[0].
+        SET nodeEta TO CLAMP(autoLeadSec, 10, 60).
     }
 
-    SET nodeVel TO VELOCITYAT(SHIP, TIME:SECONDS + nodeEta):ORBIT.
+    // Текущая орбитальная скорость
+    SET nodeVel TO SHIP:VELOCITY:ORBIT.
     SET nodeDv TO nodeVel:MAG.
 
-    PRINT "Деорбит: ETA=" + ROUND(nodeEta) + " dV=" + ROUND(nodeDv,1).
+    PRINT "Деорбит: ETA=" + ROUND(nodeEta) + " с, dV=" + ROUND(nodeDv, 1) + " м/с".
 
     IF nodeDv >= 1 {
+        // NODE(time, radial, normal, prograde)
+        // prograde = -dV => торможение против движения
         SET maneuverNode TO NODE(TimeSpan(nodeEta), 0, 0, -nodeDv).
+        
+        // Сразу добавляем ноду в план полета.
+        // До ADD нельзя обращаться к свойствам вроде DELTAV.
         ADD maneuverNode.
-        WAIT 1.
+        WAIT 0.2.
 
         UNLOCK THROTTLE.
         UNLOCK STEERING.
@@ -299,19 +290,20 @@ UNTIL isLanded OR
 
         LOCK THROTTLE TO throttleCmd.
         LOCK STEERING TO steerFacing.
-
-        WAIT 0.5.
+        
+        WAIT 1.
+    } ELSE {
+        PRINT "Горизонтальная скорость мала (<1 м/с). Деорбит не нужен.".
+        BREAK.
     }
+    
+    flightState().
 }
-
 UNTIL isLanded {
-
     flightState().
 
-    checkStage().
-
     // ==========================================================
-    //  HORIZONTAL: Активное гашение горизонтали с PD-регулятором
+    //  HORIZONTAL: Активное гашение горизонтали
     // ==========================================================
     UNTIL isLanded OR
           velHorizMag <= horizTol OR
@@ -319,10 +311,8 @@ UNTIL isLanded {
           altAGL <= finalAlt {
 
         flightState().
+
         // 1. Расчет максимального допустимого угла наклона
-        // Чтобы не улететь вверх при 100% газе, вертикальная составляющая тяги должна быть <= g.
-        // T_acc * cos(theta) <= g  =>  theta_max = arccos(g / T_acc)
-        
         LOCAL tiltRad TO 0.
         
         IF thrustAcc > gravAcc {
@@ -339,82 +329,24 @@ UNTIL isLanded {
             SET desiredDir TO upVector.
         }
 
-        // 2. PD-Регулятор тяги
-        // Цель: поддерживать постоянное замедление horizDecelTarget, пока скорость велика.
-        // По мере снижения скорости, целевое замедление может уменьшаться, но лучше держать постоянным до самого конца,
-        // чтобы избежать "дрожания" газа. 
+        // 2. Управление тягой с предсказанием
+        LOCAL baseThr TO 1.0.
+        LOCAL horizDecelMax TO thrustAcc * SIN(tiltRad).
+        LOCAL predictedDrop TO horizDecelMax * dtSec.
         
-        // Текущая горизонтальная скорость как мера прогресса
-        // Если скорость большая, хотим тормозить интенсивно.
-        // Используем простую логику: Target Accel = Constant Deceleration Rate.
-        // Но чтобы не перелететь через ноль, масштабируем целевое ускорение от текущей скорости.
-        
-        // Чем ближе к нулю, тем меньше должно быть ускорение, иначе будет overshoot.
-        // Однако PD регулятор сам справится с этим, если задать правильный набор коэффициентов.
-        // Здесь зададим целевое ускорение равным константе, пока скорость > threshold, 
-        // и линейно падающим до 0 при достижении порога.
-        
-        LOCAL targetDecel TO horizDecelTarget.
-        
-        // Смягчение вблизи нуля
-        IF velHorizMag < 2.0 {
-             SET targetDecel TO horizDecelTarget * (velHorizMag / 2.0).
+        IF predictedDrop > velHorizMag {
+            LOCAL reqAccel TO velHorizMag / MAX(0.001, dtSec).
+            SET baseThr TO clamp(reqAccel / MAX(0.01, horizDecelMax), 0, 1).
         }
 
-        // Измеряем текущее горизонтальное ускорение (производная скорости)
-        // В kOS нет прямого доступа к acc, поэтому оцениваем через изменение скорости за тик?
-        // Нет, лучше использовать разницу скоростей между кадрами.
-        // Но у нас есть только текущая скорость. 
-        // Упрощенный подход: считаем, что текущее ускорение равно тому, что было задано в прошлом кадре?
-        // Или используем P-only контроллер для начала, так как D требует точных данных об ускорении.
-        
-        // Давайте используем гибридный подход:
-        // Требуемая тяга для создания targetDecel:
-        // F_thrust_horizontal_component = Mass * targetDecel
-        // Throttle = (Mass * targetDecel) / (MaxThrust * Sin(Tilt)) ... грубо
-        
-        // Более надежный способ для kOS:
-        // Рассчитать необходимую долю тяги для достижения целевого замедления.
-        // a_needed = targetDecel
-        // T_max_horiz = ThrustAcc * Sin(tiltRad)
-        // Ratio = a_needed / T_max_horiz
-        
-        LOCAL maxHorizAccel TO thrustAcc * SIN(tiltRad).
-        LOCAL requiredRatio TO 0.
-        
-        IF maxHorizAccel > 0.01 {
-            SET requiredRatio TO clamp(targetDecel / maxHorizAccel, 0, 1).
-        } ELSE {
-            SET requiredRatio TO 0.
-        }
-        
-        // Применяем демпфирование (D-часть) основанное на изменении ошибки скорости
-        // Ошибка скорости = Current Speed - Target Speed (который стремится к 0)
-        // Но проще: следим за тем, чтобы скорость не уходила в отрицательную зону (перелет).
-        // Поскольку мы целенаправленно гасим положительную скорость, перелет невозможен физически,
-        // если тяга не превышает необходимость. 
-        
-        // Главный источник рывков — это резкое включение/выключение или скачок угла.
-        // Ограничим скорость изменения тяги (slew rate limit).
-        
-        LOCAL deltaThr TO requiredRatio - throttleCmd.
-        LOCAL maxDelta TO 0.1 * dtSec * 50. // Максимум 5 единиц тяги в секунду (приблизительно)
-        
-        IF deltaThr > maxDelta { SET deltaThr TO maxDelta. }
-        IF deltaThr < -maxDelta { SET deltaThr TO -maxDelta. }
-        
-        SET throttleCmd TO throttleCmd + deltaThr.
-        SET throttleCmd TO clamp(throttleCmd, 0, 1).
+        SET throttleCmd TO baseThr.
 
-        // Гейт ориентации
+        // Применяем гейт по ошибке ориентации
         SET throttleCmd TO thrustGate(throttleCmd, desiredDir, maxIgniteTiltDeg).
         SET throttleCmd TO clamp(throttleCmd, 0, 1).
 
         // Плавный разворот
         SET steerFacing TO rotateToward(steerFacing, desiredDir, maxSlewDeg, dtSec).
-
-        // Динамическое управление тягой
-        SET throttleCmd TO throttleCmd * MAX(0, 1 - (VANG(SHIP:FACING:VECTOR, steerFacing:VECTOR) / max_angle_error)).
 
         IF currentWarp > 0 {
             SET WARP TO 0.
@@ -426,7 +358,6 @@ UNTIL isLanded {
 
     // ==========================================================
     //  COAST / FREEFALL
-    //  Двигатель выключен, ракета вертикально, варп только безопасно.
     // ==========================================================
     UNTIL isLanded OR
           (velVert < 0 AND altAGL <= brakeAlt) OR
@@ -494,7 +425,7 @@ UNTIL isLanded {
         UNLOCK STEERING.
         UNLOCK THROTTLE.
 
-        // Передаем groundClearance в suicide_burn
+        // Передаем все необходимые параметры
         RUN suicide_burn(
             finalAlt,
             finalApproachSpeed,
@@ -516,10 +447,8 @@ UNTIL isLanded {
 
     // ==========================================================
     //  FINAL
-    //  Строго вертикально, мягкая посадка.
     // ==========================================================
     UNTIL isLanded OR altAGL > finalAlt {
-
         flightState().
 
         SET GEAR TO TRUE.
@@ -568,15 +497,11 @@ UNTIL isLanded {
 
 SET throttleCmd TO 0.
 SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
-
 UNLOCK THROTTLE.
 UNLOCK STEERING.
-
 SET WARP TO 0.
-
 SET SAS TO TRUE.
 SET GEAR TO TRUE.
-
 PRINT "=== ПОСАДКА ЗАВЕРШЕНА ===".
 PRINT "Статус: " + SHIP:STATUS.
 PRINT "Позиция: " + ROUND(SHIP:GEOPOSITION:LAT,5) + ", " + ROUND(SHIP:GEOPOSITION:LNG,5).

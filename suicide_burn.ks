@@ -1,12 +1,13 @@
-//@LAZYGLOBAL OFF.
-
+// ==========================================================================
+// suicide_burn.ks — финальное торможение перед посадкой
+// ==========================================================================
 PARAMETER exitAlt IS 100.
 PARAMETER exitSpeed IS 10.
 PARAMETER maxTiltDeg IS 8.
 PARAMETER touchdownSpeed IS 0.
 PARAMETER maxIgniteTiltDeg IS 15.
 PARAMETER slewDeg IS 10.
-PARAMETER clearance IS 20. // Безопасный запас от земли
+PARAMETER clearance IS 3. // Безопасный запас от земли (метры)
 
 RUN utils.
 
@@ -23,7 +24,8 @@ SET sbVVert TO VDOT(SHIP:VELOCITY:SURFACE, SHIP:UP:FOREVECTOR).
 
 UNTIL SHIP:STATUS = "LANDED" OR
       SHIP:STATUS = "SPLASHED" OR
-      ABS(sbVVert) <= exitSpeed {
+      sbAlt <= clearance OR 
+      (sbAlt <= exitAlt AND ABS(sbVVert) <= MAX(10, exitSpeed * 2)) {
 
     SET sbNow TO TIME:SECONDS.
     SET sbDt TO clamp(sbNow - sbLastSec, 0.01, 0.25).
@@ -46,7 +48,7 @@ UNTIL SHIP:STATUS = "LANDED" OR
     SET sbG TO safeDiv(BODY:MU, (BODY:RADIUS + SHIP:ALTITUDE)^2, 0.01).
 
     SET sbTiltDeg TO 0.
-
+    
     // Небольшой наклон только для гашения остаточной горизонтали
     IF sbVHorizMag > 0.1 {
         SET sbTiltDeg TO MIN(maxTiltDeg, sbVHorizMag * 1.0).
@@ -59,49 +61,53 @@ UNTIL SHIP:STATUS = "LANDED" OR
     SET sbVertFrac TO MAX(0.1, COS(sbTiltDeg)).
     SET sbNetAvail TO MAX(0.05, sbAcc * sbVertFrac - sbG).
 
-    // Цель — остановиться у поверхности до touchdownSpeed
-    // Но расчет ведем от высоты 'clearance', чтобы не удариться
+    // Эффективная высота для торможения (до точки касания шасси)
     LOCAL effectiveAlt TO MAX(0.1, sbAlt - clearance).
     
-    SET sbTargetMag TO SQRT(
-        MAX(0.01, touchdownSpeed * touchdownSpeed + 2 * sbNetAvail * effectiveAlt)
-    ).
+    // Максимальная скорость, которую можно погасить за оставшуюся дистанцию
+    LOCAL maxAllowedSpeed TO SQRT(MAX(0.01, 2 * sbNetAvail * effectiveAlt)).
+    
+    SET sbThrottle TO 0.
 
-    SET sbTargetVel TO -sbTargetMag.
-
-    SET sbNetCmd TO 1.2 * (sbTargetVel - sbVVert).
-
-    IF sbVVert < sbTargetVel {
-        SET sbEnergyNet TO (sbVVertAbs * sbVVertAbs - sbTargetMag * sbTargetMag) /
-                           (2 * MAX(1, effectiveAlt)).
-        SET sbNetCmd TO MAX(sbNetCmd, sbEnergyNet).
+    // Логика управления тягой
+    IF sbVVertAbs > maxAllowedSpeed {
+        // Если скорость слишком велика для остановки на этой высоте — полное торможение
+        SET sbThrottle TO 1.0.
+    } ELSE {
+        // Иначе плавное торможение к нулю на высоте clearance
+        // Требуемое замедление для остановки за remaining distance
+        LOCAL reqDecel TO (sbVVertAbs * sbVVertAbs) / (2 * MAX(0.1, effectiveAlt)).
+        
+        // Добавляем коэффициент запаса (1.2), чтобы гарантированно остановиться раньше
+        LOCAL targetDecel TO reqDecel * 1.2.
+        
+        // Переводим требуемое замедление в ускорение двигателя
+        // a_thrust_vert = g + targetDecel
+        LOCAL thrustVertAcc TO sbG + targetDecel.
+        
+        // Ограничиваем тягу
+        SET sbThrottle TO clamp(thrustVertAcc / MAX(0.1, sbAcc * sbVertFrac), 0, 1).
     }
 
-    SET sbThrustVertAcc TO sbG + sbNetCmd.
-
+    // Защита от взлета вверх у самой поверхности
     IF sbVVert > 0 AND sbAlt < MAX(50, exitAlt * 1.5) {
-        SET sbThrustVertAcc TO MIN(sbThrustVertAcc, sbG * 0.5).
+        SET sbThrottle TO MIN(sbThrottle, 0.5).
     }
 
-    IF sbThrustVertAcc < 0 {
-        SET sbThrustVertAcc TO 0.
-    }
-
-    SET sbThrottle TO thrustGate(
-        clamp(sbThrustVertAcc / MAX(0.1, sbAcc * sbVertFrac), 0, 1),
-        sbDesired,
-        maxIgniteTiltDeg
-    ).
-
+    // Гейт ориентации
+    SET sbThrottle TO thrustGate(sbThrottle, sbDesired, maxIgniteTiltDeg).
     SET sbThrottle TO clamp(sbThrottle, 0, 1).
 
+    // Плавный разворот
     SET sbSteer TO rotateToward(sbSteer, sbDesired, slewDeg, sbDt).
 
+    // Диагностика
     IF sbNow >= sbDiagTimer {
         PRINT "SB alt=" + ROUND(sbAlt) +
               " clr=" + ROUND(clearance) +
+              " effH=" + ROUND(effectiveAlt) +
               " vV=" + ROUND(sbVVert,1) +
-              " vT=" + ROUND(sbTargetVel,1) +
+              " maxV=" + ROUND(maxAllowedSpeed,1) +
               " vH=" + ROUND(sbVHorizMag,1) +
               " tilt=" + ROUND(VANG(SHIP:FACING:FOREVECTOR, sbUp),1) +
               " thr=" + ROUND(sbThrottle * 100) + "%".
