@@ -19,10 +19,12 @@ FUNCTION dynPressure { PARAMETER altM. PARAMETER speedM.
     RETURN 0.5 * atmPressure(altM) * speedM * speedM.
 }
 
-FUNCTION vectorPitch { PARAMETER directionVec.
-    LOCAL horizMag TO SQRT(directionVec:X * directionVec:X + directionVec:Z * directionVec:Z).
-    IF horizMag < 0.000001 AND ABS(directionVec:Y) < 0.000001 { RETURN 0. }
-    RETURN ARCTAN2(directionVec:Y, horizMag).
+// Угол тангажа вектора относительно горизонта
+FUNCTION vectorPitch { PARAMETER vec.
+    IF vec:MAG < 0.1 { RETURN 90. }
+    LOCAL sinGamma IS VDOT(vec, SHIP:UP:FOREVECTOR) / vec:MAG.
+    SET sinGamma TO clamp(sinGamma, -1, 1).
+    RETURN ARCSIN(sinGamma).
 }
 
 FUNCTION vecPitch { PARAMETER directionVec.

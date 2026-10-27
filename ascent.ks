@@ -47,11 +47,12 @@ FUNCTION calcTurnEndAlt {
     // Для тел С атмосферой: ищем высоту, где давление падает до 0.005 атм (~0.5 кПа).
     // При таком давлении драг на орбитальных скоростях пренебрежимо мал.
     SET maxAlt TO BODY:ATM:HEIGHT.
-    SET targetPressure TO 0.005.
+    SET targetPressure TO 0.0001.
     SET h TO 0.
     SET step TO 1000.
     
     UNTIL h >= maxAlt {
+        //print h + ": " + BODY:ATM:ALTITUDEPRESSURE(h) + " t:" + targetPressure.
         IF BODY:ATM:ALTITUDEPRESSURE(h) <= targetPressure {
             RETURN h.
         }
@@ -152,6 +153,7 @@ UNTIL phase = "done" {
                 SET pitchAlt TO 90 - 90 * altFrac.
                 SET pitchVel TO 90 - 90 * vFrac.
                 SET targetPitch TO MIN(pitchAlt, pitchVel).
+
                 // Если ракета теряет вертикальную скорость в атмосфере — опускаем нос
                 // Мягкая защита: только при существенном падении
                 IF vertSpeed < -20 AND pressure > 0.01 {
@@ -196,6 +198,7 @@ UNTIL phase = "done" {
                 SET circNode TO NODE(TimeSpan(eta_ap), 0, 0, dV).
                 ADD circNode.
                 PRINT "Node created at Ap. Required dV: " + ROUND(dV, 2) + " m/s".
+                WAIT 0.
             } ELSE {
                 PRINT "Orbit already circular (dV < 1 m/s).".
                 SET phase TO "done".
