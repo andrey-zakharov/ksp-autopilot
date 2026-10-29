@@ -14,103 +14,95 @@ FUNCTION getAlignmentAngle { PARAMETER nd.
 // CLEARSCREEN.
 PRINT "=== Maneuver Node Execution ===".
 
-IF ALLNODES:LENGTH = 0 {
+IF not hasnode {
     PRINT "No maneuver nodes found! Exiting.".
     SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
     EXIT.
 }
 
-SET activeNode TO ALLNODES[0].
-
-IF activeNode:DELTAV:MAG < 0.5 {
-    PRINT "Node dV negligible (" + ROUND(activeNode:DELTAV:MAG, 2) + " m/s). Removing.".
-    REMOVE activeNode.
-    EXIT.
-}
-
-PRINT "Node found. Required dV: " + ROUND(activeNode:DELTAV:MAG, 2) + " m/s".
+PRINT "Node found. Required dV: " + ROUND(nextnode:DELTAV:MAG, 2) + " m/s".
 
 SET accel TO MAX(0.1, SHIP:MAXTHRUST / SHIP:MASS).
-SET burnTime TO activeNode:DELTAV:MAG / accel.
+SET burnTime TO nextnode:DELTAV:MAG / accel.
 SET startBurnETA TO (burnTime / 2) + 5.
 PRINT "Estimated burn time: " + ROUND(burnTime, 1) + "s".
 PRINT "Starting burn at T-" + ROUND(startBurnETA, 1) + "s".
 
 // Разворот ДО варпа
-LOCK STEERING TO activeNode:DELTAV.
+LOCK STEERING TO nextnode:DELTAV.
 PRINT "Aligning to burn vector...".
 
 SET alignStart TO TIME:SECONDS.
-UNTIL getAlignmentAngle(activeNode) < 2 OR (TIME:SECONDS - alignStart > 120) OR ALLNODES:LENGTH = 0 {
+UNTIL getAlignmentAngle(nextnode) < 2 OR (TIME:SECONDS - alignStart > 120) OR not hasnode {
     WAIT 0.5.
 }
 
-IF ALLNODES:LENGTH = 0 {
+IF not hasnode {
     PRINT "Node disappeared during alignment. Exiting.".
     UNLOCK STEERING.
     EXIT.
 }
 
-IF getAlignmentAngle(activeNode) >= 2 {
-    PRINT "WARNING: Align timeout (angle=" + ROUND(getAlignmentAngle(activeNode), 1) + "deg). Proceeding.".
+IF getAlignmentAngle(nextnode) >= 2 {
+    PRINT "WARNING: Align timeout (angle=" + ROUND(getAlignmentAngle(nextnode), 1) + "deg). Proceeding.".
 } ELSE {
-    PRINT "Aligned (angle=" + ROUND(getAlignmentAngle(activeNode), 2) + "deg).".
+    PRINT "Aligned (angle=" + ROUND(getAlignmentAngle(nextnode), 2) + "deg).".
 }
 
 // Варп только после выравнивания
-IF activeNode:ETA > startBurnETA + 30 {
+IF nextnode:ETA > startBurnETA + 30 {
     PRINT "Warping to burn start...".
     SET WARP TO 3.
-    WAIT UNTIL activeNode:ETA <= startBurnETA + 30 OR ALLNODES:LENGTH = 0.
+    WAIT UNTIL nextnode:ETA <= startBurnETA + 30 OR not hasnode.
     SET WARP TO 0.
-    IF ALLNODES:LENGTH = 0 {
+    IF not hasnode {
         PRINT "Node disappeared during warp. Exiting.".
         UNLOCK STEERING.
         EXIT.
     }
-    IF getAlignmentAngle(activeNode) >= 2 {
+    IF getAlignmentAngle(nextnode) >= 2 {
         PRINT "Re-aligning after warp...".
         SET alignStart TO TIME:SECONDS.
-        UNTIL getAlignmentAngle(activeNode) < 2 OR (TIME:SECONDS - alignStart > 60) OR ALLNODES:LENGTH = 0 {
+        UNTIL getAlignmentAngle(nextnode) < 2 OR (TIME:SECONDS - alignStart > 60) OR not hasnode {
             WAIT 0.5.
         }
     }
 }
 
 // Финальная проверка
-IF ALLNODES:LENGTH = 0 {
+IF not hasnode {
     PRINT "Node disappeared. Exiting.".
     UNLOCK STEERING.
     EXIT.
 }
 
 SET alignStart TO TIME:SECONDS.
-UNTIL getAlignmentAngle(activeNode) < 2 OR (TIME:SECONDS - alignStart > 30) OR ALLNODES:LENGTH = 0 {
+UNTIL getAlignmentAngle(nextnode) < 2 OR (TIME:SECONDS - alignStart > 30) OR not hasnode {
     WAIT 0.1.
 }
 
-IF ALLNODES:LENGTH = 0 {
+IF not hasnode {
     PRINT "Node disappeared. Exiting.".
     UNLOCK STEERING.
     EXIT.
 }
 
-IF getAlignmentAngle(activeNode) >= 2 {
-    PRINT "WARNING: Final angle=" + ROUND(getAlignmentAngle(activeNode), 1) + "deg. Proceeding.".
+IF getAlignmentAngle(nextnode) >= 2 {
+    PRINT "WARNING: Final angle=" + ROUND(getAlignmentAngle(nextnode), 1) + "deg. Proceeding.".
 }
 
-WAIT UNTIL activeNode:ETA <= startBurnETA OR ALLNODES:LENGTH = 0.
-IF ALLNODES:LENGTH = 0 {
+WAIT UNTIL nextnode:ETA <= startBurnETA OR not hasnode.
+IF not hasnode {
     PRINT "Node disappeared. Exiting.".
     UNLOCK STEERING.
     EXIT.
 }
 
 PRINT "Burning...".
-UNTIL ALLNODES:LENGTH = 0 OR activeNode:DELTAV:MAG <= 0.5 {
-    IF activeNode:DELTAV:MAG > 10 {
+UNTIL not hasnode OR nextnode:DELTAV:MAG <= 0.5 {
+    IF nextnode:DELTAV:MAG > 10 {
         SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 1.
-    } ELSE IF activeNode:DELTAV:MAG > 2 {
+    } ELSE IF nextnode:DELTAV:MAG > 2 {
         SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.3.
     } ELSE {
         SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.1.
@@ -119,8 +111,8 @@ UNTIL ALLNODES:LENGTH = 0 OR activeNode:DELTAV:MAG <= 0.5 {
 }
 
 SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
-IF ALLNODES:LENGTH > 0 {
-    REMOVE activeNode.
+IF hasnode {
+    REMOVE nextnode.
     PRINT "Node executed successfully!".
 }
 

@@ -115,7 +115,7 @@ FUNCTION stageHasUsablePropellant {
         }
     }
     IF NOT hasProp { RETURN TRUE. }
-    IF hasSolid AND sf <= 0.1 { RETURN FALSE. }
+    IF hasSolid AND sf > 0.1 { RETURN TRUE. }
     IF hasLF AND hasOx {
         IF lf > 0.1 AND ox > 0.1 { RETURN TRUE. }
         IF lf > 0.1 AND hasAir { RETURN TRUE. }

@@ -1,205 +1,608 @@
-// align_plane.ks — совмещение плоскостей. Рамка восстанавливается по элементам орбиты,
-// калибруясь по достоверной нормали цели. Не использует SHIP:POSITION/VELOCITY.
-PARAMETER tolerance IS 0.05.
-PARAMETER steerTol IS 2.
-PARAMETER maxIterations IS 3.
-PARAMETER warpLevel IS 3.
-PARAMETER minNodeEta IS 30.
-PARAMETER clearOldNodes IS TRUE.
-
-SET activeNode TO 0.
-SET throttleCmd TO 0.
-
-FUNCTION clamp { PARAMETER x. PARAMETER lo. PARAMETER hi.
-    IF x < lo { RETURN lo. } IF x > hi { RETURN hi. } RETURN x. }
-FUNCTION normDeg { PARAMETER a. LOCAL x TO a.
-    UNTIL x >= 0 { SET x TO x + 360. } UNTIL x < 360 { SET x TO x - 360. } RETURN x. }
-FUNCTION trueToMean { PARAMETER nuDeg. PARAMETER ecc.
-    LOCAL k TO SQRT(ABS(1 - ecc) / (1 + ecc)).
-    LOCAL eAn TO 2 * ARCTAN2(k * SIN(nuDeg / 2), COS(nuDeg / 2)).
-    RETURN eAn - (180 / CONSTANT:PI) * ecc * SIN(eAn). }
-// нормаль орбиты из наклонения и LAN в мировой рамке
-FUNCTION reconNormal { PARAMETER inc. PARAMETER lan. PARAMETER ref. PARAMETER nv.
-    LOCAL eqDir TO ANGLEAXIS(lan - 90, nv) * ref.
-    RETURN ((COS(inc) * nv) + (SIN(inc) * eqDir)):NORMALIZED. }
-FUNCTION steerErrorDeg {
-    LOCAL want TO activeNode:DELTAV.
-    IF want:MAG < 0.0001 { RETURN 0. }
-    RETURN VANG(SHIP:FACING:FOREVECTOR, want). }
-
-FUNCTION findNode { PARAMETER nTgt. PARAMETER pAxis. PARAMETER qAxis.
-    PARAMETER nuNow. PARAMETER ecc. PARAMETER period. PARAMETER minEta.
-    LOCAL A TO VDOT(pAxis, nTgt). LOCAL B TO VDOT(qAxis, nTgt).
-    IF ABS(A) < 0.0000001 AND ABS(B) < 0.0000001 { RETURN List(0). }
-    LOCAL nu1 TO normDeg(ARCTAN2(-A, B)). LOCAL nu2 TO normDeg(nu1 + 180).
-    LOCAL mNow TO trueToMean(nuNow, ecc).
-    LOCAL best TO List(). LOCAL bestEta TO -1. LOCAL anyB TO List(). LOCAL anyEta TO -1.
-    LOCAL k TO 0. LOCAL nuN TO 0. LOCAL dm TO 0. LOCAL nodeEta TO 0. LOCAL item TO List().
-    UNTIL k >= 2 {
-        IF k = 0 { SET nuN TO nu1. } ELSE { SET nuN TO nu2. }
-        SET dm TO normDeg(trueToMean(nuN, ecc) - mNow).
-        SET nodeEta TO dm / 360 * period.
-        SET item TO List(nodeEta, nuN).
-        IF anyEta < 0 OR nodeEta < anyEta { SET anyEta TO nodeEta. SET anyB TO item. }
-        IF nodeEta >= minEta AND (bestEta < 0 OR nodeEta < bestEta) { SET bestEta TO nodeEta. SET best TO item. }
-        SET k TO k + 1.
-    }
-    IF best:LENGTH = 2 { RETURN best. }
-    RETURN anyB. }
-
-FUNCTION executeNode { PARAMETER steerTolDeg. PARAMETER warpLvl.
-    SAS OFF.
-    LOCK STEERING TO activeNode:DELTAV.
-    LOCAL maxAcc TO MAX(0.01, SHIP:MAXTHRUST / SHIP:MASS).
-    LOCAL burnTime TO activeNode:DELTAV:MAG / maxAcc.
-    LOCAL leadTime TO (burnTime / 2) + 5.
-    LOCAL t0 TO 0. LOCAL dv0 TO V(0,0,0). LOCAL base TO 0. LOCAL err TO 0.
-    PRINT "Горение ~" + ROUND(burnTime,1) + " с, старт за T-" + ROUND(leadTime,1) + " с".
-    SET t0 TO TIME:SECONDS.
-    UNTIL steerErrorDeg() < steerTolDeg OR (TIME:SECONDS - t0) > 180 OR NOT HASNODE { WAIT 0.2. }
-    IF NOT HASNODE { RETURN FALSE. }
-    IF activeNode:ETA > leadTime + 60 {
-        SET WARP TO warpLvl.
-        WAIT UNTIL activeNode:ETA <= (leadTime + 60) OR NOT HASNODE.
-        SET WARP TO 0. WAIT 0.5.
-        IF NOT HASNODE { RETURN FALSE. }
-        SET t0 TO TIME:SECONDS.
-        UNTIL steerErrorDeg() < steerTolDeg OR (TIME:SECONDS - t0) > 60 OR NOT HASNODE { WAIT 0.2. }
-    }
-    IF NOT HASNODE { RETURN FALSE. }
-    WAIT UNTIL activeNode:ETA <= leadTime OR NOT HASNODE.
-    IF NOT HASNODE { RETURN FALSE. }
-    SET dv0 TO activeNode:DELTAV.
-    LOCK THROTTLE TO throttleCmd.
-    UNTIL (NOT HASNODE) OR activeNode:DELTAV:MAG < 0.1 OR VDOT(dv0, activeNode:DELTAV) < 0 {
-        SET maxAcc TO MAX(0.01, SHIP:MAXTHRUST / SHIP:MASS).
-        SET err TO steerErrorDeg().
-        SET base TO MIN(1, activeNode:DELTAV:MAG / maxAcc).
-        IF err > 60 { SET throttleCmd TO 0. } ELSE { SET throttleCmd TO base * MAX(0.15, COS(err)). }
-        WAIT 0.
-    }
-    SET throttleCmd TO 0. WAIT 0.2.
-    UNLOCK THROTTLE.
-    SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
-    UNLOCK STEERING.
-    RETURN TRUE. }
+@LAZYGLOBAL OFF.
 
 // ==========================================================================
-CLEARSCREEN.
-PRINT "=== СОВМЕЩЕНИЕ ПЛОСКОСТИ ===".
-IF NOT HASTARGET { PRINT "Нет цели (клавиша Y).". EXIT. }
-IF SHIP:MAXTHRUST <= 0.01 { PRINT "Нет тяги.". EXIT. }
-IF SHIP:ORBIT:ECCENTRICITY >= 1 { PRINT "Орбита не замкнута.". EXIT. }
-IF NOT (TARGET:ORBIT:BODY:NAME = SHIP:ORBIT:BODY:NAME) { PRINT "Разные SOI.". EXIT. }
-IF clearOldNodes { UNTIL ALLNODES:LENGTH = 0 { REMOVE ALLNODES[0]. } }
+// align_plane.ks — совмещение плоскостей орбит без изменения Ap/Pe
+// Использует exec_node.ks
+//
+// Главное отличие от предыдущей версии:
+// прогноз делается аналитически от скорости ДО ноды + DELTAV ноды,
+// а не через POSITIONAT/VELOCITYAT точно в момент ноды.
+// ==========================================================================
 
-// ---- калибровка опорного направления по достоверной нормали цели (один раз) ----
-SET northVec TO SHIP:BODY:ANGULARVEL:NORMALIZED.
-SET nTgt TO VCRS(TARGET:POSITION, TARGET:VELOCITY:ORBIT):NORMALIZED.
-SET i_t TO TARGET:ORBIT:INCLINATION.
-SET lan_t TO TARGET:ORBIT:LAN.
-SET nTgtEq TO nTgt - (VDOT(nTgt, northVec) * northVec).
-SET refDir TO ANGLEAXIS(90 - lan_t, northVec) * nTgtEq:NORMALIZED.
-PRINT "Калибровка цели: " + ROUND(VANG(reconNormal(i_t, lan_t, refDir, northVec), nTgt), 3) + " deg".
+PARAMETER tolDeg IS 0.05.
+PARAMETER maxIters IS 3.
+PARAMETER minTimeSec IS 30.
+PARAMETER clearOld IS TRUE.
+PARAMETER coarseSamples IS 96.
+PARAMETER bisectIters IS 24.
+PARAMETER minBurnDv IS 0.5.
 
-SET iter TO 0. SET done TO FALSE. SET prevRelInc TO 999.
+// Допуски качества ноды
+PARAMETER maxNodeMisalignDeg IS 8.
+PARAMETER maxSpeedErr IS 2.0.
+PARAMETER maxApPeDrift IS 10000.
 
-UNTIL done {
-    SET i_s TO SHIP:ORBIT:INCLINATION.
-    SET lan_s TO SHIP:ORBIT:LAN.
-    SET nShip TO reconNormal(i_s, lan_s, refDir, northVec).
-    SET iRel TO VANG(nShip, nTgt).
+RUN utils.
 
-    CLEARSCREEN.
-    PRINT "=== СОВМЕЩЕНИЕ ПЛОСКОСТИ ===".
-    PRINT "Отн. наклонение: " + ROUND(iRel,4) + " deg    Итерация " + (iter+1) + "/" + maxIterations.
+// ==========================================================================
+// Вспомогательные функции
+// ==========================================================================
 
-    IF iRel <= tolerance { PRINT "Плоскости совпадают. ГОТОВО.". SET done TO TRUE. }
-    ELSE IF iRel > 179 { PRINT "Ретроградный случай — вручную.". SET done TO TRUE. }
-    ELSE IF iter >= maxIterations { PRINT "Лимит итераций.". SET done TO TRUE. }
-    ELSE {
-        // ---- перицентральный базис корабля из элементов (мировая рамка) ----
-        SET ecc TO SHIP:ORBIT:ECCENTRICITY.
-        SET sma TO SHIP:ORBIT:SEMIMAJORAXIS.
-        SET mu TO SHIP:ORBIT:BODY:MU.
-        SET period TO SHIP:ORBIT:PERIOD.
-        SET nuNow TO SHIP:ORBIT:TRUEANOMALY.
-        SET argp TO SHIP:ORBIT:ARGUMENTOFPERIAPSIS.
-        SET nodeDir_s TO (ANGLEAXIS(lan_s, northVec) * refDir):NORMALIZED.
-        // направление движения в восходящем узле: угловой момент вдоль nShip
-        SET e2 TO VCRS(nShip, nodeDir_s):NORMALIZED.
-        IF VDOT(VCRS(nodeDir_s, e2), nShip) < 0 { SET e2 TO (-1) * e2. }
-        SET pAxis TO ((COS(argp) * nodeDir_s) + (SIN(argp) * e2)):NORMALIZED.
-        SET qAxis TO ((-SIN(argp) * nodeDir_s) + (COS(argp) * e2)):NORMALIZED.
+FUNCTION sameSign { PARAMETER valA. PARAMETER valB.
+    IF valA >= 0 AND valB >= 0 { RETURN TRUE. }
+    IF valA <= 0 AND valB <= 0 { RETURN TRUE. }
+    RETURN FALSE.
+}
 
-        SET res TO findNode(nTgt, pAxis, qAxis, nuNow, ecc, period, minNodeEta).
-        IF res:LENGTH < 2 { PRINT "Узел не найден.". SET done TO TRUE. }
-        ELSE {
-            SET nodeEta TO res[0]. SET nuNode TO res[1].
-            SET dVec TO ((COS(nuNode) * pAxis) + (SIN(nuNode) * qAxis)):NORMALIZED.
-            SET hMag TO SQRT(mu * sma * (1 - ecc*ecc)).
-            SET vNode TO (mu / hMag) * ((-SIN(nuNode) * pAxis) + ((ecc + COS(nuNode)) * qAxis)).
-            SET nodeType TO "DN". IF VDOT(vNode, nTgt) > 0 { SET nodeType TO "AN". }
+FUNCTION orbitNormal { PARAMETER posArg. PARAMETER velArg.
+    LOCAL hVec IS VCRS(posArg, velArg).
 
-            // ---- разворот плоскости вокруг линии узлов (сохраняет апоцентр) ----
-            SET b1 TO VCRS(nShip, dVec):NORMALIZED.
-            SET b2 TO VCRS(nTgt, dVec):NORMALIZED.
-            SET vRad TO VDOT(vNode, dVec).
-            SET vTan TO VDOT(vNode, b1).
-            SET dvVec TO ((vRad * dVec) + (vTan * b2)) - vNode.
-            PRINT "Узел " + nodeType + " через " + ROUND(nodeEta,1) + " с, dV=" + ROUND(dvVec:MAG,2) + " м/с".
+    IF hVec:MAG < 0.000001 {
+        RETURN V(0, 1, 0).
+    }
 
-            // ---- нода + калибровка её осей ----
-            SET activeNode TO NODE(TimeSpan(nodeEta), 0, 1, 0).
-            ADD activeNode. WAIT 0.2.
-            SET activeNode:PROGRADE TO 0. SET activeNode:RADIALOUT TO 0.
-            SET activeNode:NORMAL TO 1. WAIT 0.1.
-            SET normAxis TO activeNode:DELTAV:NORMALIZED.
-            SET activeNode:NORMAL TO 0. SET activeNode:PROGRADE TO 1. WAIT 0.1.
-            SET proAxis TO activeNode:DELTAV:NORMALIZED.
-            SET activeNode:PROGRADE TO 0. SET activeNode:RADIALOUT TO 1. WAIT 0.1.
-            SET radAxis TO activeNode:DELTAV:NORMALIZED.
-            SET activeNode:PROGRADE TO VDOT(dvVec, proAxis).
-            SET activeNode:NORMAL TO VDOT(dvVec, normAxis).
-            SET activeNode:RADIALOUT TO VDOT(dvVec, radAxis).
-            WAIT 0.2.
+    RETURN hVec:NORMALIZED.
+}
 
-            SET rbAng TO VANG(dvVec, activeNode:DELTAV).
-            PRINT "Контроль ноды: отклонение " + ROUND(rbAng,2) + " deg".
-            // ---- ПРОГНОЗ направления разворота и автокоррекция ----
-            SET nodeUT TO TIME:SECONDS + activeNode:ETA.
-            SET vAfter TO VELOCITYAT(SHIP, nodeUT):ORBIT.          // скорость ПОСЛЕ манёвра (нода учитывается)
-            SET nAfter TO VCRS(dVec, vAfter):NORMALIZED.           // нормаль орбиты после манёвра
-            SET iRelAfter TO VANG(nAfter, nTgt).
-            PRINT "Прогноз: отн. наклонение станет " + ROUND(iRelAfter, 3) + " deg (сейчас " + ROUND(iRel, 3) + ")".
+// ==========================================================================
+// Поиск времени до узла пересечения плоскостей
+// ==========================================================================
 
-            IF iRelAfter > iRel {
-                PRINT "Разворот идёт в зеркальную плоскость — переворачиваю нормаль".
-                SET activeNode:NORMAL TO -activeNode:NORMAL.
-                WAIT 0.2.
-                // контрольная перепроверка
-                SET vAfter2 TO VELOCITYAT(SHIP, TIME:SECONDS + activeNode:ETA):ORBIT.
-                SET nAfter2 TO VCRS(dVec, vAfter2):NORMALIZED.
-                PRINT "После переворота: отн. наклонение станет " + ROUND(VANG(nAfter2, nTgt), 3) + " deg".
-            }
-            IF rbAng > 5 { PRINT "Нода легла криво — отмена.". REMOVE activeNode. SET done TO TRUE. }
-            ELSE {
-                SET ok TO executeNode(steerTol, warpLevel).
-                UNTIL ALLNODES:LENGTH = 0 { REMOVE ALLNODES[0]. }
-                SET prevRelInc TO iRel.
-                SET iter TO iter + 1.
-                IF NOT ok { PRINT "Манёвр прерван.". SET done TO TRUE. } ELSE { WAIT 2. }
-            }
+FUNCTION findNodeTime { PARAMETER planeNrm. PARAMETER minT. PARAMETER periodSec. PARAMETER samples. PARAMETER bisections.
+
+    LOCAL curUT IS TIME:SECONDS.
+    LOCAL stepSec IS MAX(1, periodSec / samples).
+
+    LOCAL tA IS minT.
+    LOCAL posA IS POSITIONAT(SHIP, curUT + tA).
+    LOCAL projA IS VDOT(posA, planeNrm).
+
+    LOCAL bestT IS tA.
+    LOCAL bestAbs IS ABS(projA).
+
+    LOCAL tB IS tA + stepSec.
+    LOCAL limitT IS minT + periodSec + stepSec.
+
+    LOCAL posB IS V(0, 0, 0).
+    LOCAL projB IS 0.
+
+    LOCAL lowT IS 0.
+    LOCAL highT IS 0.
+    LOCAL lowProj IS 0.
+    LOCAL midT IS 0.
+    LOCAL posM IS V(0, 0, 0).
+    LOCAL projM IS 0.
+    LOCAL bisectIdx IS 0.
+
+    IF projA = 0 {
+        RETURN tA.
+    }
+
+    UNTIL tB > limitT {
+
+        SET posB TO POSITIONAT(SHIP, curUT + tB).
+        SET projB TO VDOT(posB, planeNrm).
+
+        IF ABS(projB) < bestAbs {
+            SET bestAbs TO ABS(projB).
+            SET bestT TO tB.
         }
+
+        IF projB = 0 {
+            RETURN tB.
+        }
+
+        IF NOT sameSign(projA, projB) {
+
+            SET lowT TO tB - stepSec.
+            SET highT TO tB.
+            SET lowProj TO projA.
+            SET bisectIdx TO 0.
+
+            UNTIL bisectIdx >= bisections OR (highT - lowT) < 0.25 {
+
+                SET midT TO (lowT + highT) / 2.
+                SET posM TO POSITIONAT(SHIP, curUT + midT).
+                SET projM TO VDOT(posM, planeNrm).
+
+                IF projM = 0 {
+                    SET lowT TO midT.
+                    SET highT TO midT.
+                } ELSE {
+                    IF NOT sameSign(lowProj, projM) {
+                        SET highT TO midT.
+                    } ELSE {
+                        SET lowT TO midT.
+                        SET lowProj TO projM.
+                    }
+                }
+
+                SET bisectIdx TO bisectIdx + 1.
+            }
+
+            RETURN (lowT + highT) / 2.
+        }
+
+        SET tA TO tB.
+        SET projA TO projB.
+        SET tB TO tB + stepSec.
+    }
+
+    RETURN bestT.
+}
+
+// ==========================================================================
+// Кандидат на dV: поворот скорости вокруг радиус-вектора на +/- угол.
+// Возвращает List(dvVec, errDeg).
+// ==========================================================================
+
+FUNCTION rotatedPlaneDv { PARAMETER rVec. PARAMETER vVec. PARAMETER tgtNrm. PARAMETER dirSign.
+
+    LOCAL rHat IS rVec:NORMALIZED.
+    LOCAL hVec IS orbitNormal(rVec, vVec).
+    LOCAL angDeg IS VANG(hVec, tgtNrm).
+
+    LOCAL vRot IS ANGLEAXIS(dirSign * angDeg, rHat) * vVec.
+    LOCAL dvVec IS vRot - vVec.
+
+    LOCAL hRot IS orbitNormal(rVec, vRot).
+    LOCAL errDeg IS VANG(hRot, tgtNrm).
+
+    RETURN List(dvVec, errDeg).
+}
+
+// ==========================================================================
+// Локальное состояние
+// ==========================================================================
+
+LOCAL fatalFlag IS FALSE.
+LOCAL doneFlag IS FALSE.
+LOCAL iterCount IS 0.
+
+LOCAL targetNrm IS V(0, 0, 0).
+LOCAL shipNrm IS V(0, 0, 0).
+LOCAL relInc IS 0.
+
+LOCAL startAp IS 0.
+LOCAL startPe IS 0.
+LOCAL endAp IS 0.
+LOCAL endPe IS 0.
+LOCAL finalInc IS 0.
+
+LOCAL nodeTimeSec IS 0.
+LOCAL orbPeriod IS 0.
+
+LOCAL rPre IS V(0, 0, 0).
+LOCAL vPre IS V(0, 0, 0).
+LOCAL hPre IS V(0, 0, 0).
+LOCAL tNrmLocal IS V(0, 0, 0).
+LOCAL alphaDeg IS 0.
+LOCAL refSpeed IS 0.
+
+LOCAL planNode IS 0.
+
+LOCAL normAxis IS V(0, 0, 0).
+LOCAL proAxis IS V(0, 0, 0).
+LOCAL radAxis IS V(0, 0, 0).
+
+LOCAL candInfo IS List(V(0, 0, 0), 0).
+LOCAL candDv IS V(0, 0, 0).
+LOCAL candErr IS 0.
+
+LOCAL tmpPro IS 0.
+LOCAL tmpNorm IS 0.
+LOCAL tmpRad IS 0.
+LOCAL tmpNodeDv IS V(0, 0, 0).
+LOCAL tmpMis IS 0.
+LOCAL predV IS V(0, 0, 0).
+LOCAL predH IS V(0, 0, 0).
+LOCAL tmpPredErr IS 0.
+LOCAL predSpeed IS 0.
+LOCAL speedErr IS 0.
+
+LOCAL bestErrDeg IS 999.
+LOCAL bestPrograde IS 0.
+LOCAL bestNormal IS 0.
+LOCAL bestMisalign IS 999.
+LOCAL bestSpeedErr IS 999.
+LOCAL hasBest IS FALSE.
+
+LOCAL signIdx IS 0.
+LOCAL signDir IS 0.
+
+LOCAL nodeDv IS V(0, 0, 0).
+LOCAL dvMag IS 0.
+
+LOCAL postOrb IS 0.
+LOCAL postAp IS 0.
+LOCAL postPe IS 0.
+LOCAL preAp IS 0.
+LOCAL prePe IS 0.
+LOCAL driftApPlan IS 0.
+LOCAL driftPePlan IS 0.
+
+// ==========================================================================
+// Старт
+// ==========================================================================
+
+CLEARSCREEN.
+
+PRINT "=== PLANE ALIGN ===".
+PRINT "analytic forecast, Ap/Pe preserve".
+PRINT "".
+
+IF NOT HASTARGET {
+    PRINT "NO TARGET".
+    SET fatalFlag TO TRUE.
+}
+
+IF NOT fatalFlag {
+    IF SHIP:MAXTHRUST <= 0.01 {
+        PRINT "NO THRUST".
+        SET fatalFlag TO TRUE.
     }
 }
 
-// ---- итог ----
-SET nShipF TO reconNormal(SHIP:ORBIT:INCLINATION, SHIP:ORBIT:LAN, refDir, northVec).
-SET iRelF TO VANG(nShipF, nTgt).
-CLEARSCREEN.
-PRINT "=== РЕЗУЛЬТАТ ===".
-PRINT "Было: " + ROUND(prevRelInc,4) + " deg   Стало: " + ROUND(iRelF,4) + " deg".
-PRINT "Апоцентр: " + ROUND(SHIP:ORBIT:APOAPSIS) + " м".
-IF iRelF <= tolerance { PRINT "ПЛОСКОСТИ СОВМЕЩЕНЫ". }
-SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0. UNLOCK THROTTLE. UNLOCK STEERING.
+IF NOT fatalFlag {
+    IF SHIP:ORBIT:ECCENTRICITY >= 1 {
+        PRINT "OPEN ORBIT".
+        SET fatalFlag TO TRUE.
+    }
+}
+
+IF NOT fatalFlag {
+    IF TARGET:ORBIT:BODY:NAME <> SHIP:ORBIT:BODY:NAME {
+        PRINT "DIFF SOI".
+        SET fatalFlag TO TRUE.
+    }
+}
+
+IF NOT fatalFlag {
+    SET targetNrm TO orbitNormal(TARGET:POSITION, TARGET:VELOCITY:ORBIT).
+    SET startAp TO SHIP:ORBIT:APOAPSIS.
+    SET startPe TO SHIP:ORBIT:PERIAPSIS.
+
+    PRINT "Ap0/Pe0: " + ROUND(startAp) + " / " + ROUND(startPe) + " m".
+    PRINT "".
+}
+
+UNTIL doneFlag OR fatalFlag {
+
+    SET shipNrm TO orbitNormal(SHIP:POSITION, SHIP:VELOCITY:ORBIT).
+
+    // Нормали плоскости можно брать с любым знаком.
+    // Ориентируем нормаль цели так, чтобы угол был <= 90 deg.
+    IF VANG(shipNrm, targetNrm) > 90 {
+        SET targetNrm TO (-1) * targetNrm.
+    }
+
+    SET relInc TO VANG(shipNrm, targetNrm).
+
+    PRINT "IT " + (iterCount + 1) + "/" + maxIters +
+          " inc=" + ROUND(relInc, 4) +
+          " Ap/Pe=" + ROUND(SHIP:ORBIT:APOAPSIS) +
+          "/" + ROUND(SHIP:ORBIT:PERIAPSIS).
+
+    IF relInc <= tolDeg {
+        PRINT "ALIGNED".
+        SET doneFlag TO TRUE.
+    }
+
+    IF NOT doneFlag {
+        IF iterCount >= maxIters {
+            PRINT "LIMIT".
+            SET doneFlag TO TRUE.
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Поиск времени узла
+    // ----------------------------------------------------------------------
+
+    IF NOT doneFlag {
+
+        IF clearOld {
+            UNTIL NOT HASNODE {
+                REMOVE NEXTNODE.
+            }
+            WAIT 0.
+        }
+
+        SET orbPeriod TO MAX(60, SHIP:ORBIT:PERIOD).
+        SET nodeTimeSec TO findNodeTime(targetNrm, minTimeSec, orbPeriod, coarseSamples, bisectIters).
+
+        // NaN не равен сам себе
+        IF nodeTimeSec <> nodeTimeSec {
+            PRINT "BAD TIME".
+            SET doneFlag TO TRUE.
+        } ELSE {
+            PRINT "node time=" + ROUND(nodeTimeSec, 1) + " s".
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Состояние ДО ноды в момент узла
+    // Это ключевое: берем pre-burn r/v, а не post-burn из POSITIONAT/VELOCITYAT.
+    // ----------------------------------------------------------------------
+
+    IF NOT doneFlag {
+
+        SET rPre TO POSITIONAT(SHIP, TIME:SECONDS + nodeTimeSec).
+        SET vPre TO VELOCITYAT(SHIP, TIME:SECONDS + nodeTimeSec):ORBIT.
+
+        IF rPre:MAG < 1 OR vPre:MAG < 0.01 {
+            PRINT "BAD PRE-NODE STATE".
+            SET doneFlag TO TRUE.
+        } ELSE {
+
+            SET hPre TO orbitNormal(rPre, vPre).
+            SET tNrmLocal TO targetNrm.
+
+            IF VANG(hPre, tNrmLocal) > 90 {
+                SET tNrmLocal TO (-1) * tNrmLocal.
+            }
+
+            SET alphaDeg TO VANG(hPre, tNrmLocal).
+            SET refSpeed TO vPre:MAG.
+
+            PRINT "pre-node alpha=" + ROUND(alphaDeg, 4) +
+                  " deg, v=" + ROUND(refSpeed, 1) + " m/s".
+
+            IF alphaDeg <= tolDeg {
+                PRINT "ALIGNED AT NODE".
+                SET doneFlag TO TRUE.
+            }
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Создаем ноду и калибруем её оси
+    // ----------------------------------------------------------------------
+
+    IF NOT doneFlag {
+
+        SET planNode TO NODE(TimeSpan(nodeTimeSec), 0, 0, 0).
+        ADD planNode.
+        WAIT 0.5.
+
+        SET planNode:RADIALOUT TO 0.
+        SET planNode:NORMAL TO 1.
+        SET planNode:PROGRADE TO 0.
+        WAIT 0.1.
+        SET normAxis TO planNode:DELTAV:NORMALIZED.
+
+        SET planNode:NORMAL TO 0.
+        SET planNode:PROGRADE TO 1.
+        SET planNode:RADIALOUT TO 0.
+        WAIT 0.1.
+        SET proAxis TO planNode:DELTAV:NORMALIZED.
+
+        SET planNode:PROGRADE TO 0.
+        SET planNode:RADIALOUT TO 1.
+        SET planNode:NORMAL TO 0.
+        WAIT 0.1.
+        SET radAxis TO planNode:DELTAV:NORMALIZED.
+
+        IF normAxis:MAG < 0.000001 OR proAxis:MAG < 0.000001 OR radAxis:MAG < 0.000001 {
+            PRINT "BAD NODE AXES".
+            REMOVE planNode.
+            SET doneFlag TO TRUE.
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Перебираем два знака поворота и выбираем лучший по аналитическому прогнозу
+    // ----------------------------------------------------------------------
+
+    IF NOT doneFlag {
+
+        SET bestErrDeg TO 999.
+        SET bestPrograde TO 0.
+        SET bestNormal TO 0.
+        SET bestMisalign TO 999.
+        SET bestSpeedErr TO 999.
+        SET hasBest TO FALSE.
+
+        SET signIdx TO 0.
+
+        UNTIL signIdx >= 2 {
+
+            IF signIdx = 0 {
+                SET signDir TO 1.
+            } ELSE {
+                SET signDir TO -1.
+            }
+
+            SET candInfo TO rotatedPlaneDv(rPre, vPre, tNrmLocal, signDir).
+            SET candDv TO candInfo[0].
+            SET candErr TO candInfo[1].
+
+            SET tmpPro TO VDOT(candDv, proAxis).
+            SET tmpNorm TO VDOT(candDv, normAxis).
+            SET tmpRad TO VDOT(candDv, radAxis).
+
+            // Радиальную составляющую обнуляем, чтобы не менять Ap/Pe.
+            SET planNode:RADIALOUT TO 0.
+            SET planNode:NORMAL TO tmpNorm.
+            SET planNode:PROGRADE TO tmpPro.
+            WAIT 0.1.
+
+            SET tmpNodeDv TO planNode:DELTAV.
+
+            IF tmpNodeDv:MAG < 0.0001 {
+                SET tmpMis TO 999.
+            } ELSE {
+                SET tmpMis TO VANG(candDv, tmpNodeDv).
+            }
+
+            // Аналитический прогноз: скорость ДО ноды + фактический DELTAV ноды.
+            SET predV TO vPre + tmpNodeDv.
+            SET predH TO orbitNormal(rPre, predV).
+
+            IF predH:MAG < 0.000001 {
+                SET tmpPredErr TO 999.
+            } ELSE {
+                SET tmpPredErr TO VANG(predH, tNrmLocal).
+            }
+
+            SET predSpeed TO predV:MAG.
+            SET speedErr TO ABS(predSpeed - refSpeed).
+
+            PRINT "cand sign=" + signDir +
+                  " dVn=" + ROUND(tmpNorm, 3) +
+                  " dVp=" + ROUND(tmpPro, 3) +
+                  " dVr=" + ROUND(tmpRad, 3) +
+                  " mis=" + ROUND(tmpMis, 2) +
+                  " predErr=" + ROUND(tmpPredErr, 4) +
+                  " spdErr=" + ROUND(speedErr, 3).
+
+            IF tmpMis <= maxNodeMisalignDeg AND
+               speedErr <= maxSpeedErr AND
+               tmpPredErr < bestErrDeg {
+
+                SET bestErrDeg TO tmpPredErr.
+                SET bestPrograde TO tmpPro.
+                SET bestNormal TO tmpNorm.
+                SET bestMisalign TO tmpMis.
+                SET bestSpeedErr TO speedErr.
+                SET hasBest TO TRUE.
+            }
+
+            SET signIdx TO signIdx + 1.
+        }
+
+        IF NOT hasBest {
+            PRINT "NO GOOD CANDIDATE".
+            REMOVE planNode.
+            SET doneFlag TO TRUE.
+        } ELSE IF bestErrDeg >= alphaDeg {
+            PRINT "BEST CANDIDATE DOES NOT IMPROVE: best=" + ROUND(bestErrDeg, 4) +
+                  " alpha=" + ROUND(alphaDeg, 4).
+            REMOVE planNode.
+            SET doneFlag TO TRUE.
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Выставляем лучшую ноду и проверяем итоговый прогноз
+    // ----------------------------------------------------------------------
+
+    IF NOT doneFlag {
+
+        SET planNode:RADIALOUT TO 0.
+        SET planNode:NORMAL TO bestNormal.
+        SET planNode:PROGRADE TO bestPrograde.
+        WAIT 0.2.
+
+        SET nodeDv TO planNode:DELTAV.
+        SET dvMag TO nodeDv:MAG.
+
+        PRINT "FINAL node: time=" + ROUND(nodeTimeSec, 1) +
+              " dVn=" + ROUND(bestNormal, 3) +
+              " dVp=" + ROUND(bestPrograde, 3) +
+              " |dV|=" + ROUND(dvMag, 3) +
+              " mis=" + ROUND(bestMisalign, 2) +
+              " predErr=" + ROUND(bestErrDeg, 4) +
+              " spdErr=" + ROUND(bestSpeedErr, 3).
+
+        IF dvMag < minBurnDv {
+            PRINT "SMALL DV".
+            REMOVE planNode.
+            SET doneFlag TO TRUE.
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Проверка Ap/Pe через встроенный прогноз ноды
+    // ----------------------------------------------------------------------
+
+    IF NOT doneFlag {
+
+        SET postOrb TO planNode:ORBIT.
+        SET postAp TO postOrb:APOAPSIS.
+        SET postPe TO postOrb:PERIAPSIS.
+
+        SET preAp TO SHIP:ORBIT:APOAPSIS.
+        SET prePe TO SHIP:ORBIT:PERIAPSIS.
+
+        SET driftApPlan TO postAp - preAp.
+        SET driftPePlan TO postPe - prePe.
+
+        PRINT "plan Ap/Pe drift: " + ROUND(driftApPlan) + " / " + ROUND(driftPePlan) + " m".
+
+        IF ABS(driftApPlan) > maxApPeDrift OR ABS(driftPePlan) > maxApPeDrift {
+            PRINT "ABORT: too large Ap/Pe drift".
+            REMOVE planNode.
+            SET doneFlag TO TRUE.
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // Выполнение через exec_node.ks
+    // ----------------------------------------------------------------------
+
+    IF NOT doneFlag {
+
+        UNLOCK THROTTLE.
+        UNLOCK STEERING.
+        SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
+
+        PRINT "RUN exec_node".
+        RUN exec_node.
+
+        SET SAS TO FALSE.
+
+        // На случай, если exec_node что-то не добрал.
+        UNTIL NOT HASNODE {
+            REMOVE NEXTNODE.
+        }
+
+        SET iterCount TO iterCount + 1.
+        WAIT 1.
+    }
+
+    PRINT "".
+}
+
+// ==========================================================================
+// Итог
+// ==========================================================================
+
+IF startAp > 0 AND NOT fatalFlag {
+
+    SET shipNrm TO orbitNormal(SHIP:POSITION, SHIP:VELOCITY:ORBIT).
+
+    IF VANG(shipNrm, targetNrm) > 90 {
+        SET targetNrm TO (-1) * targetNrm.
+    }
+
+    SET finalInc TO VANG(shipNrm, targetNrm).
+
+    SET endAp TO SHIP:ORBIT:APOAPSIS.
+    SET endPe TO SHIP:ORBIT:PERIAPSIS.
+
+    LOCAL driftAp IS endAp - startAp.
+    LOCAL driftPe IS endPe - startPe.
+
+    PRINT "=== RESULT ===".
+    PRINT "inc=" + ROUND(finalInc, 4).
+    PRINT "Ap " + ROUND(startAp) + " -> " + ROUND(endAp) +
+          " drift=" + ROUND(driftAp).
+    PRINT "Pe " + ROUND(startPe) + " -> " + ROUND(endPe) +
+          " drift=" + ROUND(driftPe).
+
+    IF ABS(driftAp) > 1000 OR ABS(driftPe) > 1000 {
+        PRINT "WARN DRIFT".
+    }
+
+    IF finalInc <= tolDeg {
+        PRINT "OK".
+    } ELSE {
+        PRINT "NOT FULL".
+    }
+
+} ELSE {
+    PRINT "NOT RUN".
+}
+
+SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.

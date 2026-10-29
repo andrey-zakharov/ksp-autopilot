@@ -47,7 +47,7 @@ FUNCTION calcTurnEndAlt {
     // Для тел С атмосферой: ищем высоту, где давление падает до 0.005 атм (~0.5 кПа).
     // При таком давлении драг на орбитальных скоростях пренебрежимо мал.
     SET maxAlt TO BODY:ATM:HEIGHT.
-    SET targetPressure TO 0.0001.
+    SET targetPressure TO 0.00005.
     SET h TO 0.
     SET step TO 1000.
     
