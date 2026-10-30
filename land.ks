@@ -12,9 +12,9 @@ PARAMETER finalAlt IS 100.
 PARAMETER finalApproachSpeed IS 10.
 PARAMETER horizStartAlt IS 20000.
 PARAMETER brakeSafetyMargin IS 1.25.
-PARAMETER brakeLeadTime IS 1.0.
+PARAMETER brakeLeadTime IS 1.1.
 PARAMETER terrainMargin IS 5.
-PARAMETER groundClearance IS 30. 
+PARAMETER groundClearance IS 10.
 PARAMETER maxIgniteTiltDeg IS 15.
 PARAMETER suicideTiltDeg IS 8.
 

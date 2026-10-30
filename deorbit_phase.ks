@@ -12,14 +12,22 @@ PARAMETER fineDiv IS 8.
 PARAMETER searchWindows IS 1.
 PARAMETER minBurnDv IS 1.0.
 PARAMETER maxBurnDv IS 3000.
-PARAMETER doCorrection IS TRUE.    // включить коррекцию после основного горения
-PARAMETER corrMaxAcc IS 5.0.       // макс. горизонтальное ускорение коррекции, м/с²
-PARAMETER corrMaxVel IS 20.        // макс. горизонтальная скорость коррекции, м/с
-PARAMETER corrExitDist IS 150.      // радиус завершения коррекции, м
-PARAMETER corrMinAlt IS 5000.      // ниже этой высоты коррекция прекращается, м
-PARAMETER execLeadSec IS 5.       // exec_node начинает горение за burnTime/2 + execLeadSec до ноды
-PARAMETER depNodeBias IS 0.       // смещение ноды: минус = раньше, плюс = позже
-PARAMETER depLeadIter IS 2.       // итерации уточнения точки начала торможения
+PARAMETER doCorrection IS TRUE.
+
+// Агрессивная коррекция
+PARAMETER corrMaxAcc IS 6.0.        // м/с^2, раньше было 2.0
+PARAMETER corrMaxVel IS 120.0.      // м/с, раньше было 30
+PARAMETER corrExitDist IS 250.0.    // м, раньше было 50
+PARAMETER corrMinAlt IS 6000.0.     // м, раньше было 2000
+PARAMETER corrExitVel IS 8.0.       // м/с, порог остаточной горизонтали
+PARAMETER corrMaxTiltDeg IS 45.0.   // градусы, раньше было жёстко 25
+PARAMETER corrMaxThrottle IS 0.90.  // раньше было жёстко 0.5
+PARAMETER corrKp IS 0.8.            // коэффициент реакции на ошибку скорости
+PARAMETER corrSafeVVert IS -45.0.   // безопасная вертикальная скорость, м/с
+
+PARAMETER execLeadSec IS 5.
+PARAMETER depNodeBias IS 0.
+PARAMETER depLeadIter IS 2.
 
 RUN utils.
 
@@ -541,10 +549,9 @@ FUNCTION depPhaseTwo {
     PRINT "Фаза 2: гашение горизонтали завершено.".
     RETURN TRUE.
 }
+
 // ==========================================================================
-// ФАЗА 3 (опционально): коррекция к цели на малой тяге
-// Гасит остаточную горизонталь и одновременно наводится на цель.
-// Работает от конца фазы 2 до высоты corrMinAlt.
+// ФАЗА 3: агрессивная коррекция к цели на малой/средней тяге
 // ==========================================================================
 FUNCTION depPhaseThree {
     LOCAL corrThrottle TO 0.
@@ -556,96 +563,166 @@ FUNCTION depPhaseThree {
 
     LOCAL corrDone TO FALSE.
     LOCAL diagTimer TO TIME:SECONDS.
+    LOCAL tiltLimitDeg TO clamp(corrMaxTiltDeg, 0, 80).
 
     UNTIL corrDone {
 
         LOCAL altNow TO MAX(0, SHIP:ALTITUDE - SHIP:GEOPOSITION:TERRAINHEIGHT).
         LOCAL shipStatus TO SHIP:STATUS.
 
-        IF altNow < corrMinAlt OR shipStatus = "LANDED" OR shipStatus = "SPLASHED" {
+        IF shipStatus = "LANDED" OR shipStatus = "SPLASHED" {
             SET corrDone TO TRUE.
+        }
+
+        // Главное: не спускаемся слишком низко.
+        IF NOT corrDone {
+            IF altNow <= corrMinAlt {
+                SET corrDone TO TRUE.
+            }
         }
 
         IF NOT corrDone {
 
             LOCAL upNow TO SHIP:UP:FOREVECTOR.
-            LOCAL gNow TO BODY:MU / (BODY:RADIUS + SHIP:ALTITUDE)^2.
+            LOCAL velSurf TO SHIP:VELOCITY:SURFACE.
 
-            // Горизонтальный вектор на цель (учитывает вращение тела)
+            LOCAL vVert TO VDOT(velSurf, upNow).
+            LOCAL vHoriz TO velSurf - (vVert * upNow).
+            LOCAL vHorizMag TO vHoriz:MAG.
+
+            LOCAL gNow TO safeDiv(BODY:MU, (BODY:RADIUS + SHIP:ALTITUDE)^2, 0.001).
+            LOCAL massNow TO MAX(0.001, SHIP:MASS).
+            LOCAL maxAccNow TO MAX(0.1, SHIP:MAXTHRUST / massNow).
+
+            // Вектор на цель в мировой системе
             LOCAL tgtWorld TO BODY:GEOPOSITIONLATLNG(siteLat, siteLng):POSITION.
             LOCAL shipWorld TO SHIP:POSITION.
             LOCAL toTarget TO tgtWorld - shipWorld.
-            LOCAL vertComp TO VDOT(toTarget, upNow).
-            LOCAL horizToTarget TO toTarget - vertComp * upNow.
+
+            LOCAL targetVert TO VDOT(toTarget, upNow).
+            LOCAL horizToTarget TO toTarget - (targetVert * upNow).
             LOCAL distToTarget TO horizToTarget:MAG.
 
-            // Текущая горизонтальная скорость
-            LOCAL velSurf TO SHIP:VELOCITY:SURFACE.
-            LOCAL vVert TO VDOT(velSurf, upNow).
-            LOCAL vHoriz TO velSurf - vVert * upNow.
-            LOCAL vHorizMag TO vHoriz:MAG.
+            // ----------------------------------------------------------
+            // Желаемая горизонтальная скорость
+            // ----------------------------------------------------------
+            LOCAL desiredHSpeed TO 0.
 
-            // Время до достижения высоты завершения коррекции
-            LOCAL fallDist TO MAX(0, altNow - corrMinAlt).
-            LOCAL timeToTarget TO 0.
-
-            IF vVert < -0.1 {
-                // Уже падает: 0.5*g*t² + |vVert|*t - fallDist = 0
-                SET timeToTarget TO (-ABS(vVert) + SQRT(vVert * vVert + 2 * gNow * fallDist)) / gNow.
-                IF timeToTarget < 0 { SET timeToTarget TO 0. }
-            } ELSE {
-                SET timeToTarget TO SQRT(2 * fallDist / MAX(0.01, gNow)).
-            }
-            IF timeToTarget < 1 { SET timeToTarget TO 1. }
-
-            // Требуемая горизонтальная скорость, чтобы оказаться над целью
-            LOCAL desiredVHoriz TO V(0, 0, 0).
             IF distToTarget > corrExitDist {
-                LOCAL desiredSpeed TO distToTarget / timeToTarget.
-                IF desiredSpeed > corrMaxVel { SET desiredSpeed TO corrMaxVel. }
-                SET desiredVHoriz TO horizToTarget:NORMALIZED * desiredSpeed.
+                // Планируем не "до земли", а короткий горизонт 3..20 секунд.
+                LOCAL planTime TO distToTarget / MAX(1, corrMaxVel * 0.75).
+                SET planTime TO clamp(planTime, 3, 20).
+
+                SET desiredHSpeed TO MIN(corrMaxVel, distToTarget / planTime).
+
+                // Если уже летим быстрее нужного — не разгоняемся ещё сильнее.
+                IF vHorizMag > desiredHSpeed * 1.25 {
+                    SET desiredHSpeed TO vHorizMag * 0.75.
+                }
             }
 
-            // P-регулятор по ошибке скорости
-            LOCAL velErr TO desiredVHoriz - vHoriz.
-            LOCAL desiredAcc TO velErr * 0.4.
-            LOCAL desiredAccMag TO desiredAcc:MAG.
-
-            IF desiredAccMag > corrMaxAcc {
-                SET desiredAcc TO desiredAcc:NORMALIZED * corrMaxAcc.
-                SET desiredAccMag TO corrMaxAcc.
+            LOCAL desiredHVec TO V(0, 0, 0).
+            IF distToTarget > 1 AND desiredHSpeed > 0.1 {
+                SET desiredHVec TO horizToTarget:NORMALIZED * desiredHSpeed.
             }
 
-            IF desiredAccMag > 0.05 {
-                LOCAL accDir TO desiredAcc:NORMALIZED.
-                LOCAL tiltAngle TO ARCTAN(desiredAccMag / MAX(0.1, gNow)).
-                IF tiltAngle > 25 { SET tiltAngle TO 25. }
+            // ----------------------------------------------------------
+            // Горизонтальное ускорение
+            // ----------------------------------------------------------
+            LOCAL hErr TO desiredHVec - vHoriz.
+            LOCAL desiredHAcc TO hErr * corrKp.
+            LOCAL desiredHAccMag TO desiredHAcc:MAG.
 
-                LOCAL thrustDir TO (COS(tiltAngle) * upNow + SIN(tiltAngle) * accDir):NORMALIZED.
-                SET corrSteer TO LOOKDIRUP(thrustDir, upNow).
+            IF desiredHAccMag > corrMaxAcc {
+                SET desiredHAcc TO desiredHAcc:NORMALIZED * corrMaxAcc.
+                SET desiredHAccMag TO corrMaxAcc.
+            }
 
-                // Тяга: горизонтальное ускорение через наклон + компенсация гравитации
-                LOCAL maxAccAvail TO SHIP:MAXTHRUST / MAX(0.001, SHIP:MASS).
-                LOCAL sinTilt TO SIN(tiltAngle).
-                IF sinTilt < 0.02 { SET sinTilt TO 0.02. }
-                LOCAL neededAcc TO MAX(desiredAccMag / sinTilt, gNow / COS(tiltAngle)).
-                SET corrThrottle TO clamp(neededAcc / MAX(0.1, maxAccAvail), 0, 0.5).
+            // ----------------------------------------------------------
+            // Вертикальная безопасность
+            // Не даём фазе 3 разогнать ракету вниз.
+            // ----------------------------------------------------------
+            LOCAL vertAcc TO 0.
+            LOCAL vVertErr TO corrSafeVVert - vVert.
+
+            IF vVertErr > 5 {
+                // Падаем слишком быстро — тормозим вверх.
+                SET vertAcc TO MIN(corrMaxAcc, vVertErr * 0.35).
+            } ELSE IF vVertErr < -15 {
+                // Падаем слишком медленно или растём — немного помогаем гравитации.
+                SET vertAcc TO MAX(-corrMaxAcc * 0.25, vVertErr * 0.15).
+            }
+
+            LOCAL cmdAcc TO desiredHAcc + (vertAcc * upNow).
+
+            // ----------------------------------------------------------
+            // Ограничение по наклону.
+            // Горизонтальное ускорение не может быть больше g * tan(tilt).
+            // ----------------------------------------------------------
+            LOCAL horizCmd TO cmdAcc - (VDOT(cmdAcc, upNow) * upNow).
+            LOCAL horizCmdMag TO horizCmd:MAG.
+            LOCAL maxHorizAcc TO gNow * TAN(tiltLimitDeg).
+
+            IF horizCmdMag > maxHorizAcc AND horizCmdMag > 0.01 {
+                SET horizCmd TO horizCmd:NORMALIZED * maxHorizAcc.
+                SET cmdAcc TO horizCmd + (vertAcc * upNow).
+            }
+
+            // ----------------------------------------------------------
+            // Желаемый вектор тяги
+            // ----------------------------------------------------------
+            LOCAL thrustWant TO (gNow * upNow + cmdAcc).
+
+            IF NOT vecIsOk(thrustWant) OR thrustWant:MAG < 0.01 {
+                SET thrustWant TO upNow.
             } ELSE {
-                SET corrSteer TO LOOKDIRUP(upNow, upNow).
-                SET corrThrottle TO 0.
+                SET thrustWant TO thrustWant:NORMALIZED.
             }
 
-            // Выход: промах мал и горизонтальная скорость мала
-            IF distToTarget < corrExitDist AND vHorizMag < 2.0 {
+            LOCAL neededAcc TO (gNow * upNow + cmdAcc):MAG.
+            SET corrThrottle TO clamp(neededAcc / maxAccNow, 0, corrMaxThrottle).
+
+            // ----------------------------------------------------------
+            // Руль
+            // ----------------------------------------------------------
+            LOCAL tiltDeg TO VANG(thrustWant, upNow).
+
+            IF tiltDeg < 1.0 {
+                SET corrSteer TO rotateToward(corrSteer, upNow, 30, 0.1).
+            } ELSE {
+                SET corrSteer TO LOOKDIRUP(thrustWant, upNow).
+            }
+
+            // ----------------------------------------------------------
+            // Ранний выход: достаточно близко и не слишком быстро падаем
+            // ----------------------------------------------------------
+            IF distToTarget <= corrExitDist AND
+               vHorizMag <= corrExitVel AND
+               vVert >= corrSafeVVert - 15 {
                 SET corrDone TO TRUE.
             }
 
+            // Запасной ранний выход: если уже почти у цели, но не идеально
+            IF NOT corrDone {
+                IF altNow <= corrMinAlt + 1500 AND
+                   distToTarget <= corrExitDist * 2.5 AND
+                   vHorizMag <= corrExitVel * 2.5 AND
+                   vVert >= corrSafeVVert - 25 {
+                    SET corrDone TO TRUE.
+                }
+            }
+
+            // ----------------------------------------------------------
+            // Диагностика
+            // ----------------------------------------------------------
             IF TIME:SECONDS > diagTimer {
                 PRINT "Фаза 3: dist=" + ROUND(distToTarget) +
                       " vH=" + ROUND(vHorizMag, 1) +
+                      " vV=" + ROUND(vVert, 1) +
                       " alt=" + ROUND(altNow) +
-                      " thr=" + ROUND(corrThrottle * 100) + "%".
-                SET diagTimer TO TIME:SECONDS + 2.
+                      " thr=" + ROUND(corrThrottle * 100) + "%" +
+                      " tilt=" + ROUND(tiltDeg, 1).
+                SET diagTimer TO TIME:SECONDS + 1.
             }
 
             WAIT 0.
@@ -653,11 +730,13 @@ FUNCTION depPhaseThree {
     }
 
     SET corrThrottle TO 0.
-    WAIT 0.1.
+    WAIT 0.05.
+
     UNLOCK THROTTLE.
     UNLOCK STEERING.
     SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
-    PRINT "Фаза 3: коррекция завершена.".
+
+    PRINT "Фаза 3: коррекция завершена, передача посадке.".
     RETURN TRUE.
 }
 
