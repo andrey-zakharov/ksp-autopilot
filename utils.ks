@@ -189,3 +189,221 @@ FUNCTION estimateTurnTime { PARAMETER angleDeg. PARAMETER massKg.
     // Добавляем запас 2 секунды на инерцию и стабилизацию
     RETURN (angleDeg / estRate) + 2.
 }
+
+// ==========================================================================
+// Общие функции орбитальной механики и работы с нодами
+// Используются в align_plane.ks и deorbit_phase.ks
+// ==========================================================================
+
+// Проверка конечности числа (ловит NaN и бесконечности)
+FUNCTION isFiniteVal { PARAMETER inpVal.
+    IF inpVal <> inpVal { RETURN FALSE. }
+    IF inpVal > 1000000000000000 { RETURN FALSE. }
+    IF inpVal < -1000000000000000 { RETURN FALSE. }
+    RETURN TRUE.
+}
+
+// Проверка конечности вектора
+FUNCTION vecIsOk { PARAMETER inpVec.
+    IF NOT isFiniteVal(inpVec:MAG) { RETURN FALSE. }
+    IF NOT isFiniteVal(inpVec:X) { RETURN FALSE. }
+    IF NOT isFiniteVal(inpVec:Y) { RETURN FALSE. }
+    IF NOT isFiniteVal(inpVec:Z) { RETURN FALSE. }
+    RETURN TRUE.
+}
+
+// Нормализация угла в [0, 360)
+FUNCTION normDeg360 { PARAMETER angVal.
+    IF NOT isFiniteVal(angVal) { RETURN 0. }
+    LOCAL normAng TO angVal - 360 * FLOOR(angVal / 360).
+    IF normAng < 0 { SET normAng TO normAng + 360. }
+    IF normAng >= 360 { SET normAng TO normAng - 360. }
+    IF NOT isFiniteVal(normAng) { RETURN 0. }
+    RETURN normAng.
+}
+
+// Нормаль орбиты по векторам позиции и скорости
+FUNCTION orbitNormal { PARAMETER posArg. PARAMETER velArg.
+    LOCAL hVec IS VCRS(posArg, velArg).
+    IF NOT vecIsOk(hVec) OR hVec:MAG < 0.000001 {
+        RETURN V(0, 1, 0).
+    }
+    RETURN hVec:NORMALIZED.
+}
+
+// ==========================================================================
+// Полная орбитальная информация по векторам позиции и скорости.
+// Возвращает List(rp, toPeSec, eHat, hHat, ok).
+//   rp      — радиус перицентра
+//   toPeSec — время до перицентра в секундах
+//   eHat    — направление на перицентр (единичный вектор эксцентриситета)
+//   hHat    — нормаль орбиты
+//   ok      — TRUE если расчёт успешен
+// ==========================================================================
+FUNCTION orbitInfoFromState { PARAMETER posArg. PARAMETER velArg.
+    LOCAL badList TO List(-1, 0, V(0, 0, 0), V(0, 1, 0), FALSE).
+
+    LOCAL rMag TO posArg:MAG.
+    LOCAL vMag TO velArg:MAG.
+    LOCAL muVal TO BODY:MU.
+
+    IF NOT isFiniteVal(rMag) OR NOT isFiniteVal(vMag) OR NOT isFiniteVal(muVal) {
+        RETURN badList.
+    }
+    IF rMag < 1 OR vMag < 0.01 OR muVal <= 0 { RETURN badList. }
+
+    LOCAL hVec TO VCRS(posArg, velArg).
+    LOCAL hMag TO hVec:MAG.
+    IF NOT vecIsOk(hVec) OR hMag < 0.000001 { RETURN badList. }
+    LOCAL hHat TO hVec:NORMALIZED.
+
+    LOCAL pSem TO hMag * hMag / muVal.
+    LOCAL rHat TO posArg:NORMALIZED.
+    LOCAL eVec TO VCRS(velArg, hVec) / muVal - rHat.
+    LOCAL eMag TO eVec:MAG.
+
+    IF NOT vecIsOk(eVec) OR NOT isFiniteVal(eMag) { RETURN badList. }
+
+    IF eMag < 0.000001 {
+        RETURN List(rMag, 0, rHat, hHat, TRUE).
+    }
+    IF eMag >= 0.995 { RETURN badList. }
+
+    LOCAL rpVal TO pSem / (1 + eMag).
+    LOCAL energy TO vMag * vMag / 2 - muVal / rMag.
+    IF NOT isFiniteVal(rpVal) OR rpVal <= 0 { RETURN badList. }
+    IF NOT isFiniteVal(energy) OR energy >= 0 { RETURN badList. }
+
+    LOCAL smaVal TO -muVal / (2 * energy).
+    LOCAL periodArg TO smaVal * smaVal * smaVal / muVal.
+    IF NOT isFiniteVal(periodArg) OR periodArg <= 0 { RETURN badList. }
+    LOCAL periodVal TO 2 * CONSTANT:PI * SQRT(periodArg).
+    IF NOT isFiniteVal(periodVal) OR periodVal <= 0 { RETURN badList. }
+
+    LOCAL eHat TO eVec:NORMALIZED.
+    IF NOT vecIsOk(eHat) { RETURN badList. }
+
+    LOCAL cosNu TO clamp(VDOT(eHat, rHat), -1, 1).
+    LOCAL nuDeg TO ARCCOS(cosNu).
+    IF VDOT(velArg, rHat) < 0 { SET nuDeg TO 360 - nuDeg. }
+
+    LOCAL eFacArg TO (1 - eMag) / (1 + eMag).
+    IF NOT isFiniteVal(eFacArg) { RETURN badList. }
+    LOCAL eFac TO SQRT(MAX(0.000001, eFacArg)).
+    LOCAL eAnDeg TO normDeg360(2 * ARCTAN2(eFac * SIN(nuDeg / 2), COS(nuDeg / 2))).
+    LOCAL mDeg TO normDeg360(eAnDeg - (180 / CONSTANT:PI) * eMag * SIN(eAnDeg)).
+
+    LOCAL toDeg TO 360 - mDeg.
+    IF toDeg >= 360 { SET toDeg TO 0. }
+    IF toDeg < 0 { SET toDeg TO 0. }
+
+    LOCAL toPeSec TO toDeg / 360 * periodVal.
+    IF NOT isFiniteVal(toPeSec) OR toPeSec < 0 { RETURN badList. }
+
+    RETURN List(rpVal, toPeSec, eHat, hHat, TRUE).
+}
+
+// ==========================================================================
+// Поиск времени пересечения орбиты с плоскостью (нормаль = planeNormal).
+// Использует бисекцию. Возвращает время в секундах от текущего момента.
+// ==========================================================================
+FUNCTION findPlaneCrossTime { PARAMETER planeNormal. PARAMETER minTime. PARAMETER periodSec.
+    LOCAL curUT TO TIME:SECONDS.
+    LOCAL stepSec TO MAX(5, periodSec / 48).
+
+    LOCAL timeA TO minTime.
+    LOCAL projA TO VDOT(bodyPosAt(timeA), planeNormal).
+
+    LOCAL bestTime TO timeA.
+    LOCAL bestAbsVal TO ABS(projA).
+
+    LOCAL timeB TO timeA + stepSec.
+    LOCAL limitT TO minTime + periodSec + stepSec.
+
+    UNTIL timeB > limitT {
+        LOCAL posB TO bodyPosAt(timeB).
+        LOCAL projB TO VDOT(posB, planeNormal).
+
+        IF ABS(projB) < bestAbsVal {
+            SET bestAbsVal TO ABS(projB).
+            SET bestTime TO timeB.
+        }
+
+        IF (projA >= 0 AND projB < 0) OR (projA < 0 AND projB >= 0) {
+            LOCAL lowT TO timeA.
+            LOCAL highT TO timeB.
+            LOCAL lowProj TO projA.
+            LOCAL bisectIdx TO 0.
+
+            UNTIL bisectIdx >= 20 OR (highT - lowT) < 0.5 {
+                LOCAL midT TO (lowT + highT) / 2.
+                LOCAL posRawM TO POSITIONAT(SHIP, TIMESTAMP(curUT + midT)).
+                LOCAL bodyPosM TO BODY:POSITION.
+                LOCAL posM TO posRawM.
+                IF vecIsOk(bodyPosM) AND bodyPosM:MAG > 1 {
+                    SET posM TO posRawM - bodyPosM.
+                }
+                LOCAL projM TO VDOT(posM, planeNormal).
+
+                IF (lowProj >= 0 AND projM < 0) OR (lowProj < 0 AND projM >= 0) {
+                    SET highT TO midT.
+                } ELSE {
+                    SET lowT TO midT.
+                    SET lowProj TO projM.
+                }
+                SET bisectIdx TO bisectIdx + 1.
+            }
+
+            RETURN (lowT + highT) / 2.
+        }
+
+        SET timeA TO timeB.
+        SET projA TO projB.
+        SET timeB TO timeB + stepSec.
+        WAIT 0.
+    }
+
+    RETURN bestTime.
+}
+
+// ==========================================================================
+// Калибровка реальных осей ноды.
+// Нода должна быть уже создана и добавлена (например с NORMAL=1).
+// Возвращает List(realRadial, realNormal, realPrograde).
+// ==========================================================================
+FUNCTION calibrateNodeAxes {
+    IF NOT HASNODE {
+        RETURN List(V(0, 0, 0), V(0, 0, 0), V(0, 0, 0)).
+    }
+
+    SET NEXTNODE:RADIALOUT TO 0.
+    SET NEXTNODE:NORMAL TO 0.
+    SET NEXTNODE:PROGRADE TO 0.
+    WAIT 0.1.
+
+    SET NEXTNODE:NORMAL TO 1.
+    WAIT 0.1.
+    LOCAL realNormal TO NEXTNODE:DELTAV:NORMALIZED.
+
+    SET NEXTNODE:NORMAL TO 0.
+    SET NEXTNODE:PROGRADE TO 1.
+    WAIT 0.1.
+    LOCAL realPrograde TO NEXTNODE:DELTAV:NORMALIZED.
+
+    SET NEXTNODE:PROGRADE TO 0.
+    SET NEXTNODE:RADIALOUT TO 1.
+    WAIT 0.1.
+    LOCAL realRadial TO NEXTNODE:DELTAV:NORMALIZED.
+
+    RETURN List(realRadial, realNormal, realPrograde).
+}
+
+// Позиция корабля в момент через deltaSec секунд, ОТ ЦЕНТРА ТЕЛА
+FUNCTION bodyPosAt { PARAMETER deltaSec.
+    LOCAL rawPos TO POSITIONAT(SHIP, TIMESTAMP(TIME:SECONDS + deltaSec)).
+    LOCAL bodyPos TO BODY:POSITION.
+    IF vecIsOk(bodyPos) AND bodyPos:MAG > 1 {
+        RETURN rawPos - bodyPos.
+    }
+    RETURN rawPos.
+}

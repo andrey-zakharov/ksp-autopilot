@@ -32,14 +32,6 @@ PARAMETER maxSearchRadius IS 10000.
 
 RUN utils.
 
-// Источник выбора площадки:
-// "TARGET"  — по цели
-// "MANUAL"  — вручную
-// "AUTO"    — автоматически под орбитой
-SET siteSource TO "MANUAL".
-SET autoLeadSec TO 0.
-SET autoBrakeSec TO 0.
-
 // ==========================================================================
 //  УТИЛИТЫ ПОИСКА ПЛОЩАДКИ И ГЕОМЕТРИИ
 // ==========================================================================
@@ -180,12 +172,10 @@ IF HASTARGET {
     // Приоритет 1: активная цель
     SET startLat TO TARGET:GEOPOSITION:LAT.
     SET startLng TO TARGET:GEOPOSITION:LNG.
-    SET siteSource TO "TARGET".
     PRINT "Цель: " + TARGET:NAME + " -> " + ROUND(startLat,4) + ", " + ROUND(startLng,4).
 
 } ELSE IF (ABS(initLat) > 0.0) OR (ABS(initLng) > 0.0) {
     // Приоритет 2: явные координаты
-    SET siteSource TO "MANUAL".
     PRINT "Заданные координаты: " + ROUND(startLat,4) + ", " + ROUND(startLng,4).
 
 } ELSE {
@@ -222,9 +212,6 @@ IF HASTARGET {
         IF leadSec < autoMarginSec { SET leadSec TO autoMarginSec. }
     }
 
-    SET siteSource TO "AUTO".
-    SET autoBrakeSec TO brakeSec.
-    SET autoLeadSec TO leadSec.
 
     SET nowUT TO TIME:SECONDS.
     SET futurePos TO POSITIONAT(SHIP, nowUT + leadSec).

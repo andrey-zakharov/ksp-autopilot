@@ -10,6 +10,7 @@ PARAMETER maxSlope IS 5.
 PARAMETER touchdownSpeed IS 0.
 PARAMETER finalAlt IS 100.
 PARAMETER finalApproachSpeed IS 10.
+PARAMETER horizStartAlt IS 20000.
 PARAMETER brakeSafetyMargin IS 1.25.
 PARAMETER brakeLeadTime IS 1.0.
 PARAMETER terrainMargin IS 5.
@@ -22,6 +23,7 @@ PARAMETER maxSlewDeg IS 10.
 PARAMETER coastLeadTime IS 20.
 PARAMETER maxWarpAim IS 6.
 PARAMETER maxWarpRate IS 2.
+
 
 RUN utils.
 
@@ -131,19 +133,28 @@ flightState().
 PRINT "=== ПОСАДКА ===".
 PRINT "Статус: " + SHIP:STATUS + " AGL=" + ROUND(altAGL).
 
-// 1. Выбор площадки
-RUN find_landing_site(landLat, landLng, maxSlope).
-SET siteLat TO landingLat.
-SET siteLng TO landingLng.
-SET siteTerrain TO landingTerrain.
-PRINT "Цель: " + ROUND(siteLat,5) + "," + ROUND(siteLng,5).
+// 1. Площадка: если есть цель — она уже размещена игроком, поиск не нужен
+IF HASTARGET {
+    SET siteLat TO TARGET:GEOPOSITION:LAT.
+    SET siteLng TO TARGET:GEOPOSITION:LNG.
+    SET siteTerrain TO BODY:GEOPOSITIONLATLNG(siteLat, siteLng):TERRAINHEIGHT.
+    PRINT "Цель: " + TARGET:NAME + " " + ROUND(siteLat,5) + "," + ROUND(siteLng,5).
+} ELSE {
+    RUN find_landing_site(landLat, landLng, maxSlope).
+    SET siteLat TO landingLat.
+    SET siteLng TO landingLng.
+    SET siteTerrain TO landingTerrain.
+    PRINT "Площадка: " + ROUND(siteLat,5) + "," + ROUND(siteLng,5).
+}
+PRINT "Рельеф цели: " + ROUND(siteTerrain) + " м".
 WAIT 1.
 
 LOCK isLanded TO SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED".
 
 // 2. Деорбит (если нужны)
 IF SHIP:ORBIT:PERIAPSIS > 0 AND SHIP:VELOCITY:ORBIT:MAG > 5 {
-    RUN deorbit_phase.
+    //RUN deorbit_phase(horizStartAlt).
+    RUN deorbit_phase(horizStartAlt, 100, 48, 8, 1, 1.0, 3000).
     
     UNLOCK THROTTLE.
     UNLOCK STEERING.
@@ -166,9 +177,10 @@ UNTIL isLanded {
     // --- Фаза HORIZONTAL ---
     // Пока есть значимая горизонталь и мы высоко
     UNTIL isLanded OR
-          velHorizMag <= 1.0 OR // Порог из horizontal_brake.ks (HORIZ_TOL)
-          (velVert < 0 AND altAGL <= brakeAlt) OR
-          altAGL <= finalAlt {
+        velHorizMag <= 1.0 OR
+        altAGL > horizStartAlt OR
+        (velVert < 0 AND altAGL <= brakeAlt) OR
+        altAGL <= finalAlt {
         
         flightState().
         RUN horizontal_brake. 
@@ -191,7 +203,8 @@ UNTIL isLanded {
     // --- Фаза COAST ---
     UNTIL isLanded OR
           (velVert < 0 AND altAGL <= brakeAlt) OR
-          altAGL <= finalAlt {
+          altAGL <= finalAlt OR
+          (velHorizMag > 1.0 AND altAGL <= horizStartAlt) {
         
         flightState().
         SET throttleCmd TO 0.

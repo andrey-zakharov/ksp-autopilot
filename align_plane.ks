@@ -13,8 +13,6 @@ PARAMETER tolDeg IS 0.05.
 PARAMETER maxIters IS 3.
 PARAMETER minTimeSec IS 30.
 PARAMETER clearOld IS TRUE.
-PARAMETER coarseSamples IS 96.
-PARAMETER bisectIters IS 24.
 PARAMETER minBurnDv IS 0.5.
 
 // Допуски качества ноды
@@ -32,103 +30,6 @@ FUNCTION sameSign { PARAMETER valA. PARAMETER valB.
     IF valA >= 0 AND valB >= 0 { RETURN TRUE. }
     IF valA <= 0 AND valB <= 0 { RETURN TRUE. }
     RETURN FALSE.
-}
-
-FUNCTION orbitNormal { PARAMETER posArg. PARAMETER velArg.
-    LOCAL hVec IS VCRS(posArg, velArg).
-
-    IF hVec:MAG < 0.000001 {
-        RETURN V(0, 1, 0).
-    }
-
-    RETURN hVec:NORMALIZED.
-}
-
-// ==========================================================================
-// Поиск времени до узла пересечения плоскостей
-// ==========================================================================
-
-FUNCTION findNodeTime { PARAMETER planeNrm. PARAMETER minT. PARAMETER periodSec. PARAMETER samples. PARAMETER bisections.
-
-    LOCAL curUT IS TIME:SECONDS.
-    LOCAL stepSec IS MAX(1, periodSec / samples).
-
-    LOCAL tA IS minT.
-    LOCAL posA IS POSITIONAT(SHIP, curUT + tA).
-    LOCAL projA IS VDOT(posA, planeNrm).
-
-    LOCAL bestT IS tA.
-    LOCAL bestAbs IS ABS(projA).
-
-    LOCAL tB IS tA + stepSec.
-    LOCAL limitT IS minT + periodSec + stepSec.
-
-    LOCAL posB IS V(0, 0, 0).
-    LOCAL projB IS 0.
-
-    LOCAL lowT IS 0.
-    LOCAL highT IS 0.
-    LOCAL lowProj IS 0.
-    LOCAL midT IS 0.
-    LOCAL posM IS V(0, 0, 0).
-    LOCAL projM IS 0.
-    LOCAL bisectIdx IS 0.
-
-    IF projA = 0 {
-        RETURN tA.
-    }
-
-    UNTIL tB > limitT {
-
-        SET posB TO POSITIONAT(SHIP, curUT + tB).
-        SET projB TO VDOT(posB, planeNrm).
-
-        IF ABS(projB) < bestAbs {
-            SET bestAbs TO ABS(projB).
-            SET bestT TO tB.
-        }
-
-        IF projB = 0 {
-            RETURN tB.
-        }
-
-        IF NOT sameSign(projA, projB) {
-
-            SET lowT TO tB - stepSec.
-            SET highT TO tB.
-            SET lowProj TO projA.
-            SET bisectIdx TO 0.
-
-            UNTIL bisectIdx >= bisections OR (highT - lowT) < 0.25 {
-
-                SET midT TO (lowT + highT) / 2.
-                SET posM TO POSITIONAT(SHIP, curUT + midT).
-                SET projM TO VDOT(posM, planeNrm).
-
-                IF projM = 0 {
-                    SET lowT TO midT.
-                    SET highT TO midT.
-                } ELSE {
-                    IF NOT sameSign(lowProj, projM) {
-                        SET highT TO midT.
-                    } ELSE {
-                        SET lowT TO midT.
-                        SET lowProj TO projM.
-                    }
-                }
-
-                SET bisectIdx TO bisectIdx + 1.
-            }
-
-            RETURN (lowT + highT) / 2.
-        }
-
-        SET tA TO tB.
-        SET projA TO projB.
-        SET tB TO tB + stepSec.
-    }
-
-    RETURN bestT.
 }
 
 // ==========================================================================
@@ -309,7 +210,7 @@ UNTIL doneFlag OR fatalFlag {
         }
 
         SET orbPeriod TO MAX(60, SHIP:ORBIT:PERIOD).
-        SET nodeTimeSec TO findNodeTime(targetNrm, minTimeSec, orbPeriod, coarseSamples, bisectIters).
+        SET nodeTimeSec TO findPlaneCrossTime(targetNrm, minTimeSec, orbPeriod).
 
         // NaN не равен сам себе
         IF nodeTimeSec <> nodeTimeSec {
