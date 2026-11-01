@@ -1,409 +1,534 @@
-FUNCTION clamp { PARAMETER val. PARAMETER loVal. PARAMETER hiVal.
-    IF val < loVal { RETURN loVal. }
-    IF val > hiVal { RETURN hiVal. }
-    RETURN val.
+@lazyglobal off.
+
+// ==========================================================================
+// utils.ks — общие функции проекта
+// ==========================================================================
+
+// --------------------------------------------------------------------------
+// Удаление всех нод
+// --------------------------------------------------------------------------
+function removeNodes {
+    until not HASNODE {
+        remove NEXTNODE.
+        wait 0.
+    }
 }
 
-FUNCTION safeDiv { PARAMETER numerator. PARAMETER denominator. PARAMETER defVal.
-    IF ABS(denominator) < 0.000001 { RETURN defVal. }
-    RETURN numerator / denominator.
+// --------------------------------------------------------------------------
+// Проверки чисел и векторов
+// --------------------------------------------------------------------------
+function isFiniteVal { parameter valueNum.
+    if valueNum <> valueNum { return false. }
+    if valueNum > 1000000000000000 { return false. }
+    if valueNum < -1000000000000000 { return false. }
+    return true.
 }
 
-FUNCTION atmPressure { PARAMETER altM.
-    IF NOT BODY:ATM:EXISTS { RETURN 0. }
-    RETURN BODY:ATM:ALTITUDEPRESSURE(altM).
+function vecIsOk { parameter vecValue.
+    if not isFiniteVal(vecValue:MAG) { return false. }
+    if not isFiniteVal(vecValue:X) { return false. }
+    if not isFiniteVal(vecValue:Y) { return false. }
+    if not isFiniteVal(vecValue:Z) { return false. }
+    return true.
 }
 
-FUNCTION dynPressure { PARAMETER altM. PARAMETER speedM.
-    IF NOT BODY:ATM:EXISTS { RETURN 0. }
-    RETURN 0.5 * atmPressure(altM) * speedM * speedM.
+// --------------------------------------------------------------------------
+// Ограничение значения
+// --------------------------------------------------------------------------
+function clamp { parameter valueNum. parameter loNum. parameter hiNum.
+    if valueNum < loNum { return loNum. }
+    if valueNum > hiNum { return hiNum. }
+    return valueNum.
 }
 
-// Угол тангажа вектора относительно горизонта
-FUNCTION vectorPitch { PARAMETER vec.
-    IF vec:MAG < 0.1 { RETURN 90. }
-    LOCAL sinGamma IS VDOT(vec, SHIP:UP:FOREVECTOR) / vec:MAG.
-    SET sinGamma TO clamp(sinGamma, -1, 1).
-    RETURN ARCSIN(sinGamma).
+// Алиас для совместимости со старыми вызовами
+function clampVal { parameter valueNum. parameter loNum. parameter hiNum.
+    return clamp(valueNum, loNum, hiNum).
 }
 
-FUNCTION vecPitch { PARAMETER directionVec.
-    RETURN vectorPitch(directionVec).
+// --------------------------------------------------------------------------
+// Безопасное деление
+// --------------------------------------------------------------------------
+function safeDiv { parameter numValue. parameter denValue. parameter fallbackValue.
+    if not isFiniteVal(numValue) { return fallbackValue. }
+    if not isFiniteVal(denValue) { return fallbackValue. }
+    if ABS(denValue) < 0.000001 { return fallbackValue. }
+
+    local resValue to numValue / denValue.
+    if not isFiniteVal(resValue) { return fallbackValue. }
+    return resValue.
 }
 
-FUNCTION vectorYaw { PARAMETER directionVec.
-    RETURN ARCTAN2(directionVec:X, directionVec:Z).
+// --------------------------------------------------------------------------
+// Нормализация углов
+// --------------------------------------------------------------------------
+function normDeg360 { parameter angValue.
+    if not isFiniteVal(angValue) { return 0. }
+
+    local normValue to angValue - 360 * FLOOR(angValue / 360).
+    if normValue < 0 { set normValue to normValue + 360. }
+    if normValue >= 360 { set normValue to normValue - 360. }
+    if not isFiniteVal(normValue) { return 0. }
+
+    return normValue.
 }
 
-FUNCTION vecYaw { PARAMETER directionVec.
-    RETURN vectorYaw(directionVec).
+function wrap180Deg { parameter angValue.
+    return normDeg360(angValue + 180) - 180.
 }
 
+// Знаковый угол от fromVec к toVec относительно нормаль.
+// Положительный = по направлению нормали, отрицательный = против.
+function signedAngleDeg { parameter fromVec. parameter toVec. parameter normalVec.
+    local angValue to VANG(fromVec, toVec).
+    if not isFiniteVal(angValue) { return 999. }
 
-FUNCTION thrustGate { PARAMETER desired. PARAMETER wantVec. PARAMETER maxErrDeg.
-    IF wantVec:MAG < 0.000001 { RETURN desired. }
+    local crossVec to VCRS(fromVec, toVec).
+    if vecIsOk(crossVec) and VDOT(crossVec, normalVec) < 0 {
+        set angValue to (-1) * angValue.
+    }
 
-    LOCAL aimErr TO VANG(SHIP:FACING:FOREVECTOR, wantVec:NORMALIZED).
-
-    IF aimErr > maxErrDeg { RETURN 0. }
-
-    RETURN desired * clamp(COS(aimErr), 0.2, 1).
+    return wrap180Deg(angValue).
 }
+
+// --------------------------------------------------------------------------
+// Оценка времени разворота (эвристика для планирования нод)
+// --------------------------------------------------------------------------
+function estimateTurnTime { parameter angleDeg. parameter massValue.
+    local absDeg to ABS(angleDeg).
+    if not isFiniteVal(absDeg) or absDeg < 0.1 { return 0. }
+
+    local massTons to 1.
+    if isFiniteVal(massValue) {
+        set massTons to clamp(massValue, 0.05, 1000).
+    }
+
+    local rateDeg to 25 / SQRT(massTons).
+    set rateDeg to clamp(rateDeg, 2, 35).
+
+    local timeValue to absDeg / rateDeg + 1.5.
+    if not isFiniteVal(timeValue) { return 5. }
+
+    return MAX(1, timeValue).
+}
+
+// --------------------------------------------------------------------------
+// Плавный поворот направления к целевому вектору
+// --------------------------------------------------------------------------
+function rotateToward { parameter currentFacing. parameter targetVec. parameter maxDeg. parameter dtSec.
+    local curDir to currentFacing:FOREVECTOR.
+    local tgtDir to targetVec.
+    local upVec to SHIP:UP:FOREVECTOR.
+
+    if not vecIsOk(tgtDir) or tgtDir:MAG < 0.000001 { return currentFacing. }
+    set tgtDir to tgtDir:NORMALIZED.
+
+    if not vecIsOk(curDir) or curDir:MAG < 0.000001 {
+        return LOOKDIRUP(tgtDir, upVec).
+    }
+    set curDir to curDir:NORMALIZED.
+
+    local angValue to VANG(curDir, tgtDir).
+    if not isFiniteVal(angValue) { return currentFacing. }
+    if angValue < 0.05 { return currentFacing. }
+
+    local stepValue to 5.
+    if isFiniteVal(maxDeg) { set stepValue to maxDeg. }
+    if isFiniteVal(dtSec) and dtSec > 0.001 { set stepValue to stepValue * dtSec. }
+    set stepValue to clamp(stepValue, 0.1, 180).
+
+    if stepValue >= angValue { return LOOKDIRUP(tgtDir, upVec). }
+
+    local axisVec to VCRS(curDir, tgtDir).
+    if not vecIsOk(axisVec) or axisVec:MAG < 0.000001 {
+        return LOOKDIRUP(tgtDir, upVec).
+    }
+    set axisVec to axisVec:NORMALIZED.
+
+    local newDir to ANGLEAXIS(stepValue, axisVec) * curDir.
+    if not vecIsOk(newDir) or newDir:MAG < 0.000001 {
+        return LOOKDIRUP(tgtDir, upVec).
+    }
+
+    return LOOKDIRUP(newDir:NORMALIZED, upVec).
+}
+
+// --------------------------------------------------------------------------
+// Гейт тяги по ориентации
+// --------------------------------------------------------------------------
+function thrustGate { parameter desired. parameter wantVec. parameter maxErrDeg.
+    if wantVec:MAG < 0.000001 { return desired. }
+
+    local aimErr to VANG(SHIP:FACING:FOREVECTOR, wantVec:NORMALIZED).
+    if aimErr > maxErrDeg { return 0. }
+
+    return desired * clamp(COS(aimErr), 0.2, 1).
+}
+
+// --------------------------------------------------------------------------
+// Позиция корабля в момент +deltaSec секунд, ОТ ЦЕНТРА ТЕЛА
+// --------------------------------------------------------------------------
+function bodyPosAt { parameter deltaSec.
+    local dtValue to 0.
+    if isFiniteVal(deltaSec) { set dtValue to deltaSec. }
+
+    local rawPos to POSITIONAT(SHIP, TIMESTAMP(TIME:SECONDS + dtValue)).
+    local bodyPos to BODY:POSITION.
+
+    if vecIsOk(bodyPos) and bodyPos:MAG > 1 {
+        return rawPos - bodyPos.
+    }
+    return rawPos.
+}
+
+// --------------------------------------------------------------------------
+// Нормаль орбиты по векторам позиции и скорости
+// --------------------------------------------------------------------------
+function orbitNormal { parameter posArg. parameter velArg.
+    local hVec to VCRS(posArg, velArg).
+    if not vecIsOk(hVec) or hVec:MAG < 0.000001 { return V(0, 1, 0). }
+    return hVec:NORMALIZED.
+}
+
+// --------------------------------------------------------------------------
+// Полная орбитальная информация по векторам позиции и скорости.
+// Возвращает List(rp, toPeSec, eHat, hHat, ok).
+//   rp      — радиус перицентра
+//   toPeSec — время до перицентра в секундах
+//   eHat    — направление на перицентр (вектор эксцентриситета)
+//   hHat    — нормаль орбиты
+//   ok      — true если расчёт успешен
+// --------------------------------------------------------------------------
+function orbitInfoFromStateMu { parameter posArg. parameter velArg. parameter muVal.
+    local badList to LIST(-1, 0, V(0, 0, 0), V(0, 1, 0), false).
+
+    local rMag to posArg:MAG.
+    local vMag to velArg:MAG.
+
+    if not isFiniteVal(rMag) or not isFiniteVal(vMag) or not isFiniteVal(muVal) { return badList. }
+    if rMag < 1 or vMag < 0.01 or muVal <= 0 { return badList. }
+
+    local hVec to VCRS(posArg, velArg).
+    local hMag to hVec:MAG.
+    if not vecIsOk(hVec) or hMag < 0.000001 { return badList. }
+
+    local hHat to hVec:NORMALIZED.
+    local pSem to hMag * hMag / muVal.
+    local rHat to posArg:NORMALIZED.
+    if not vecIsOk(rHat) { return badList. }
+
+    local eVec to VCRS(velArg, hVec) / muVal - rHat.
+    local eMag to eVec:MAG.
+    if not vecIsOk(eVec) or not isFiniteVal(eMag) { return badList. }
+
+    if eMag < 0.000001 { return LIST(rMag, 0, rHat, hHat, true). }
+    if eMag >= 0.995 { return badList. }
+
+    local rpVal to pSem / (1 + eMag).
+    local energy to vMag * vMag / 2 - muVal / rMag.
+
+    if not isFiniteVal(rpVal) or rpVal <= 0 { return badList. }
+    if not isFiniteVal(energy) or energy >= 0 { return badList. }
+
+    local smaVal to -muVal / (2 * energy).
+    local periodArg to smaVal * smaVal * smaVal / muVal.
+    if not isFiniteVal(periodArg) or periodArg <= 0 { return badList. }
+
+    local periodVal to 2 * CONSTANT:PI * SQRT(periodArg).
+    if not isFiniteVal(periodVal) or periodVal <= 0 { return badList. }
+
+    local eHat to eVec:NORMALIZED.
+    if not vecIsOk(eHat) { return badList. }
+
+    local cosNu to clamp(VDOT(eHat, rHat), -1, 1).
+    if not isFiniteVal(cosNu) { return badList. }
+
+    local nuDeg to ARCCOS(cosNu).
+    if not isFiniteVal(nuDeg) { return badList. }
+
+    if VDOT(velArg, rHat) < 0 { set nuDeg to 360 - nuDeg. }
+    set nuDeg to normDeg360(nuDeg).
+
+    local eFacArg to (1 - eMag) / (1 + eMag).
+    if not isFiniteVal(eFacArg) { return badList. }
+
+    local eFac to SQRT(MAX(0.000001, eFacArg)).
+    if not isFiniteVal(eFac) { return badList. }
+
+    local eAnDeg to 2 * ARCTAN2(eFac * SIN(nuDeg / 2), COS(nuDeg / 2)).
+    set eAnDeg to normDeg360(eAnDeg).
+
+    local mDeg to eAnDeg - (180 / CONSTANT:PI) * eMag * SIN(eAnDeg).
+    set mDeg to normDeg360(mDeg).
+
+    local toDeg to 360 - mDeg.
+    if toDeg >= 360 { set toDeg to 0. }
+    if toDeg < 0 { set toDeg to 0. }
+
+    local toPeSec to toDeg / 360 * periodVal.
+    if not isFiniteVal(toPeSec) or toPeSec < 0 { return badList. }
+
+    return LIST(rpVal, toPeSec, eHat, hHat, true).
+}
+
+// Обёртка с текущим телом
+function orbitInfoFromState { parameter posArg. parameter velArg.
+    return orbitInfoFromStateMu(posArg, velArg, BODY:MU).
+}
+
+// --------------------------------------------------------------------------
+// Поиск времени пересечения орбиты с плоскостью (нормаль = planeNormal).
+// Возвращает время в секундах от текущего момента.
+// --------------------------------------------------------------------------
+function findPlaneCrossTime { parameter planeNormal. parameter minTime. parameter periodSec.
+    if not vecIsOk(planeNormal) or planeNormal:MAG < 0.000001 { return -1. }
+    set planeNormal to planeNormal:NORMALIZED.
+
+    local periodValue to MAX(60, periodSec).
+    if not isFiniteVal(periodValue) { set periodValue to 3600. }
+
+    local stepValue to MAX(2, periodValue / 48).
+    local timeA to MAX(0, minTime).
+
+    local posA to bodyPosAt(timeA).
+    if not vecIsOk(posA) { return -1. }
+
+    local projA to VDOT(posA, planeNormal).
+    if not isFiniteVal(projA) { return -1. }
+
+    local bestTime to timeA.
+    local bestAbs to ABS(projA).
+
+    local timeB to timeA + stepValue.
+    local limitT to timeA + periodValue + stepValue.
+    local waitCnt to 0.
+
+    until timeB > limitT {
+        local posB to bodyPosAt(timeB).
+        local projB to 999.
+
+        if vecIsOk(posB) { set projB to VDOT(posB, planeNormal). }
+
+        if isFiniteVal(projB) {
+            if ABS(projB) < bestAbs {
+                set bestAbs to ABS(projB).
+                set bestTime to timeB.
+            }
+
+            if (projA >= 0 and projB < 0) or (projA < 0 and projB >= 0) {
+                local lowT to timeA.
+                local highT to timeB.
+                local lowProj to projA.
+                local bisectIdx to 0.
+
+                until bisectIdx >= 22 or (highT - lowT) < 0.5 {
+                    local midT to (lowT + highT) / 2.
+                    local posM to bodyPosAt(midT).
+                    local projM to 999.
+
+                    if vecIsOk(posM) { set projM to VDOT(posM, planeNormal). }
+
+                    if not isFiniteVal(projM) {
+                        set highT to midT.
+                    } else if (lowProj >= 0 and projM < 0) or (lowProj < 0 and projM >= 0) {
+                        set highT to midT.
+                    } else {
+                        set lowT to midT.
+                        set lowProj to projM.
+                    }
+
+                    set bisectIdx to bisectIdx + 1.
+                }
+
+                return (lowT + highT) / 2.
+            }
+
+            set timeA to timeB.
+            set projA to projB.
+        }
+
+        set timeB to timeB + stepValue.
+        set waitCnt to waitCnt + 1.
+
+        if waitCnt >= 8 {
+            set waitCnt to 0.
+            wait 0.
+        }
+    }
+
+    return bestTime.
+}
+
+// --------------------------------------------------------------------------
+// Калибровка реальных осей ноды.
+// Нода должна быть уже создана и добавлена.
+// Возвращает List(realRadial, realNormal, realPrograde).
+// --------------------------------------------------------------------------
+function calibrateNodeAxes {
+    local zeroList to LIST(V(0, 0, 0), V(0, 0, 0), V(0, 0, 0)).
+    if not HASNODE { return zeroList. }
+
+    set NEXTNODE:RADIALOUT to 0.
+    set NEXTNODE:NORMAL to 0.
+    set NEXTNODE:PROGRADE to 0.
+    wait 0.05.
+
+    set NEXTNODE:NORMAL to 1.
+    wait 0.05.
+
+    local realNormal to NEXTNODE:DELTAV.
+    if not vecIsOk(realNormal) or realNormal:MAG < 0.000001 { return zeroList. }
+    set realNormal to realNormal:NORMALIZED.
+
+    set NEXTNODE:NORMAL to 0.
+    set NEXTNODE:PROGRADE to 1.
+    wait 0.05.
+
+    local realPrograde to NEXTNODE:DELTAV.
+    if not vecIsOk(realPrograde) or realPrograde:MAG < 0.000001 { return zeroList. }
+    set realPrograde to realPrograde:NORMALIZED.
+
+    set NEXTNODE:PROGRADE to 0.
+    set NEXTNODE:RADIALOUT to 1.
+    wait 0.05.
+
+    local realRadial to NEXTNODE:DELTAV.
+    if not vecIsOk(realRadial) or realRadial:MAG < 0.000001 { return zeroList. }
+    set realRadial to realRadial:NORMALIZED.
+
+    return LIST(realRadial, realNormal, realPrograde).
+}
+
 // --------------------------------------------------------------------------
 // Мировая позиция точки поверхности в будущий момент времени
-// Используется в land.ks для расчёта точки деорбита с учётом вращения тела
 // --------------------------------------------------------------------------
-FUNCTION surfacePosAt { PARAMETER latDeg. PARAMETER lngDeg. PARAMETER deltaSec.
-    LOCAL rotRateDeg TO 360 / BODY:ROTATIONPERIOD.
-    LOCAL totalLngDeg TO lngDeg + BODY:ROTATIONANGLE + rotRateDeg * deltaSec.
+function surfacePosAt { parameter latDeg. parameter lngDeg. parameter deltaSec.
+    local rotRateDeg to 360 / BODY:ROTATIONPERIOD.
+    local totalLngDeg to lngDeg + BODY:ROTATIONANGLE + rotRateDeg * deltaSec.
+    local latRad to latDeg * CONSTANT:PI / 180.
+    local lngRad to totalLngDeg * CONSTANT:PI / 180.
+    local radiusM to BODY:RADIUS + BODY:GEOPOSITIONLATLNG(latDeg, lngDeg):TERRAINHEIGHT.
 
-    LOCAL latRad TO latDeg * CONSTANT:PI / 180.
-    LOCAL lngRad TO totalLngDeg * CONSTANT:PI / 180.
-
-    LOCAL radiusM TO BODY:RADIUS + BODY:GEOPOSITIONLATLNG(latDeg, lngDeg):TERRAINHEIGHT.
-
-    RETURN V(
+    return V(
         radiusM * COS(latRad) * COS(lngRad),
         radiusM * SIN(latRad),
         radiusM * COS(latRad) * SIN(lngRad)
     ).
 }
 
-FUNCTION aimGate { PARAMETER aimErr. PARAMETER maxErr. PARAMETER thr.
-    IF aimErr > maxErr {
-        RETURN 0.
-    }
-    RETURN thr * clamp(COS(aimErr), 0.2, 1).
+// --------------------------------------------------------------------------
+// Атмосфера и динамическое давление
+// --------------------------------------------------------------------------
+function atmPressure { parameter altM.
+    if not BODY:ATM:EXISTS { return 0. }
+    return BODY:ATM:ALTITUDEPRESSURE(altM).
 }
 
+function dynPressure { parameter altM. parameter speedM.
+    if not BODY:ATM:EXISTS { return 0. }
+    return 0.5 * atmPressure(altM) * speedM * speedM.
+}
 
-FUNCTION stageHasUsablePropellant {
-    LOCAL resList IS STAGE:RESOURCES.
-    LOCAL lf TO 0.
-    LOCAL ox TO 0.
-    LOCAL sf TO 0.
-    LOCAL mp TO 0.
-    LOCAL xn TO 0.
-    LOCAL hasLF TO FALSE.
-    LOCAL hasOx TO FALSE.
-    LOCAL hasSolid TO FALSE.
-    LOCAL hasAir TO FALSE.
-    LOCAL hasProp TO FALSE.
-    FOR r IN resList {
-        IF r:CAPACITY > 0.1 {
-            IF r:NAME = "LiquidFuel" {
-                SET hasLF TO TRUE.
-                SET hasProp TO TRUE.
-                SET lf TO lf + r:AMOUNT.
-            } ELSE IF r:NAME = "Oxidizer" {
-                SET hasOx TO TRUE.
-                SET hasProp TO TRUE.
-                SET ox TO ox + r:AMOUNT.
-            } ELSE IF r:NAME = "SolidFuel" {
-                SET hasSolid TO TRUE.
-                SET hasProp TO TRUE.
-                SET sf TO sf + r:AMOUNT.
-            } ELSE IF r:NAME = "MonoPropellant" {
-                SET hasProp TO TRUE.
-                SET mp TO mp + r:AMOUNT.
-            } ELSE IF r:NAME = "XenonGas" {
-                SET hasProp TO TRUE.
-                SET xn TO xn + r:AMOUNT.
-            } ELSE IF r:NAME = "IntakeAir" {
-                SET hasAir TO TRUE.
+// --------------------------------------------------------------------------
+// Углы тангажа и рыскания вектора
+// --------------------------------------------------------------------------
+function vectorPitch { parameter vec.
+    if vec:MAG < 0.1 { return 90. }
+
+    local sinGamma to VDOT(vec, SHIP:UP:FOREVECTOR) / vec:MAG.
+    set sinGamma to clamp(sinGamma, -1, 1).
+    return ARCSIN(sinGamma).
+}
+
+function vecPitch { parameter directionVec.
+    return vectorPitch(directionVec).
+}
+
+function vectorYaw { parameter directionVec.
+    return ARCTAN2(directionVec:X, directionVec:Z).
+}
+
+function vecYaw { parameter directionVec.
+    return vectorYaw(directionVec).
+}
+
+function aimGate { parameter aimErr. parameter maxErr. parameter thr.
+    if aimErr > maxErr { return 0. }
+    return thr * clamp(COS(aimErr), 0.2, 1).
+}
+
+// --------------------------------------------------------------------------
+// Проверка топлива и ступени
+// --------------------------------------------------------------------------
+function stageHasUsablePropellant {
+    local resList to STAGE:RESOURCES.
+    local lf to 0.
+    local ox to 0.
+    local sf to 0.
+    local mp to 0.
+    local xn to 0.
+    local hasLF to false.
+    local hasOx to false.
+    local hasSolid to false.
+    local hasAir to false.
+    local hasProp to false.
+
+    for r in resList {
+        if r:CAPACITY > 0.1 {
+            if r:NAME = "LiquidFuel" {
+                set hasLF to true.
+                set hasProp to true.
+                set lf to lf + r:AMOUNT.
+            } else if r:NAME = "Oxidizer" {
+                set hasOx to true.
+                set hasProp to true.
+                set ox to ox + r:AMOUNT.
+            } else if r:NAME = "SolidFuel" {
+                set hasSolid to true.
+                set hasProp to true.
+                set sf to sf + r:AMOUNT.
+            } else if r:NAME = "MonoPropellant" {
+                set hasProp to true.
+                set mp to mp + r:AMOUNT.
+            } else if r:NAME = "XenonGas" {
+                set hasProp to true.
+                set xn to xn + r:AMOUNT.
+            } else if r:NAME = "IntakeAir" {
+                set hasAir to true.
             }
         }
     }
-    IF NOT hasProp { RETURN TRUE. }
-    IF hasSolid AND sf > 0.1 { RETURN TRUE. }
-    IF hasLF AND hasOx {
-        IF lf > 0.1 AND ox > 0.1 { RETURN TRUE. }
-        IF lf > 0.1 AND hasAir { RETURN TRUE. }
-        RETURN FALSE.
+
+    if not hasProp { return true. }
+    if hasSolid and sf > 0.1 { return true. }
+    if hasLF and hasOx {
+        if lf > 0.1 and ox > 0.1 { return true. }
+        if lf > 0.1 and hasAir { return true. }
+        return false.
     }
-    IF hasLF { RETURN lf > 0.1. }
-    IF mp > 0.1 OR xn > 0.1 { RETURN TRUE. }
-    RETURN FALSE.
+    if hasLF { return lf > 0.1. }
+    if mp > 0.1 or xn > 0.1 { return true. }
+    return false.
 }
 
-
-
-FUNCTION shouldStage {
-    IF SHIP:MAXTHRUST <= 0.01 { RETURN TRUE. }
-    IF NOT stageHasUsablePropellant() { RETURN TRUE. }
-    RETURN FALSE.
+function shouldStage {
+    if SHIP:MAXTHRUST <= 0.01 { return true. }
+    if not stageHasUsablePropellant() { return true. }
+    return false.
 }
 
+// --------------------------------------------------------------------------
 // PD-регулятор для плавного управления тягой
-// targetAccel - желаемое ускорение
-// currentAccel - текущее измеренное ускорение (или скорость изменения)
-// kp - коэффициент пропорциональности
-// kd - коэффициент дифференцирования (демпфирование)
-// prevError - ошибка с прошлого тика для расчета D-составляющей
-// dt - время шага
-FUNCTION pidThrottle { PARAMETER targetAccel. PARAMETER currentAccel. PARAMETER kp. PARAMETER kd. PARAMETER prevError. PARAMETER dt.
-    LOCAL error TO targetAccel - currentAccel.
-    
-    // D-составляющая: скорость изменения ошибки
-    LOCAL derivative TO 0.
-    IF dt > 0.001 {
-        SET derivative TO (error - prevError) / dt.
-    }
-    
-    // Итоговое управляющее воздействие
-    LOCAL output TO kp * error + kd * derivative.
-    
-    RETURN List(output, error).
-}
+// Возвращает List(output, error).
+// --------------------------------------------------------------------------
+function pidThrottle { parameter targetAccel. parameter currentAccel. parameter kp. parameter kd. parameter prevError. parameter dt.
+    local error to targetAccel - currentAccel.
+    local derivative to 0.
 
-
-// Плавный поворот текущего направления к целевому
-FUNCTION rotateToward { PARAMETER currentRot. PARAMETER wantVec. PARAMETER rateDeg. PARAMETER dtSec.
-    IF wantVec:MAG < 0.000001 { RETURN currentRot. }
-
-    LOCAL curVec TO currentRot:FOREVECTOR.
-    LOCAL wantN TO wantVec:NORMALIZED.
-    LOCAL angErr TO VANG(curVec, wantN).
-
-    IF angErr <= 0.05 { RETURN currentRot. }
-
-    LOCAL rotAxis TO VCRS(curVec, wantN).
-    IF rotAxis:MAG < 0.000001 { RETURN currentRot. }
-
-    SET rotAxis TO rotAxis:NORMALIZED.
-
-    LOCAL stepDeg TO MIN(angErr, MAX(0.01, rateDeg * dtSec)).
-    RETURN ANGLEAXIS(stepDeg, rotAxis) * currentRot.
-}
-
-// Расчет времени разворота для деорбита (эвристика)
-// Для тяжелых кораблей нужно больше времени, для легких меньше.
-// Мы используем это для установки ETA ноды, а не для управления рулем.
-FUNCTION estimateTurnTime { PARAMETER angleDeg. PARAMETER massKg.
-    // Базовая скорость ~20 deg/s для легкой ракеты (<5 тонн)
-    // Замедляется линейно с массой до ~5 deg/s для тяжелой (>50 тонн)
-    LOCAL baseRate TO 20.
-    LOCAL massFactor TO CLAMP(massKg / 50000, 0.25, 1.0). // 1.0 для 50кг+, 0.25 для 200т+
-    LOCAL estRate TO MAX(5, baseRate * massFactor).
-    
-    // Добавляем запас 2 секунды на инерцию и стабилизацию
-    RETURN (angleDeg / estRate) + 2.
-}
-
-// ==========================================================================
-// Общие функции орбитальной механики и работы с нодами
-// Используются в align_plane.ks и deorbit_phase.ks
-// ==========================================================================
-
-// Проверка конечности числа (ловит NaN и бесконечности)
-FUNCTION isFiniteVal { PARAMETER inpVal.
-    IF inpVal <> inpVal { RETURN FALSE. }
-    IF inpVal > 1000000000000000 { RETURN FALSE. }
-    IF inpVal < -1000000000000000 { RETURN FALSE. }
-    RETURN TRUE.
-}
-
-// Проверка конечности вектора
-FUNCTION vecIsOk { PARAMETER inpVec.
-    IF NOT isFiniteVal(inpVec:MAG) { RETURN FALSE. }
-    IF NOT isFiniteVal(inpVec:X) { RETURN FALSE. }
-    IF NOT isFiniteVal(inpVec:Y) { RETURN FALSE. }
-    IF NOT isFiniteVal(inpVec:Z) { RETURN FALSE. }
-    RETURN TRUE.
-}
-
-// Нормализация угла в [0, 360)
-FUNCTION normDeg360 { PARAMETER angVal.
-    IF NOT isFiniteVal(angVal) { RETURN 0. }
-    LOCAL normAng TO angVal - 360 * FLOOR(angVal / 360).
-    IF normAng < 0 { SET normAng TO normAng + 360. }
-    IF normAng >= 360 { SET normAng TO normAng - 360. }
-    IF NOT isFiniteVal(normAng) { RETURN 0. }
-    RETURN normAng.
-}
-
-// Нормаль орбиты по векторам позиции и скорости
-FUNCTION orbitNormal { PARAMETER posArg. PARAMETER velArg.
-    LOCAL hVec IS VCRS(posArg, velArg).
-    IF NOT vecIsOk(hVec) OR hVec:MAG < 0.000001 {
-        RETURN V(0, 1, 0).
-    }
-    RETURN hVec:NORMALIZED.
-}
-
-// ==========================================================================
-// Полная орбитальная информация по векторам позиции и скорости.
-// Возвращает List(rp, toPeSec, eHat, hHat, ok).
-//   rp      — радиус перицентра
-//   toPeSec — время до перицентра в секундах
-//   eHat    — направление на перицентр (единичный вектор эксцентриситета)
-//   hHat    — нормаль орбиты
-//   ok      — TRUE если расчёт успешен
-// ==========================================================================
-FUNCTION orbitInfoFromState { PARAMETER posArg. PARAMETER velArg.
-    LOCAL badList TO List(-1, 0, V(0, 0, 0), V(0, 1, 0), FALSE).
-
-    LOCAL rMag TO posArg:MAG.
-    LOCAL vMag TO velArg:MAG.
-    LOCAL muVal TO BODY:MU.
-
-    IF NOT isFiniteVal(rMag) OR NOT isFiniteVal(vMag) OR NOT isFiniteVal(muVal) {
-        RETURN badList.
-    }
-    IF rMag < 1 OR vMag < 0.01 OR muVal <= 0 { RETURN badList. }
-
-    LOCAL hVec TO VCRS(posArg, velArg).
-    LOCAL hMag TO hVec:MAG.
-    IF NOT vecIsOk(hVec) OR hMag < 0.000001 { RETURN badList. }
-    LOCAL hHat TO hVec:NORMALIZED.
-
-    LOCAL pSem TO hMag * hMag / muVal.
-    LOCAL rHat TO posArg:NORMALIZED.
-    LOCAL eVec TO VCRS(velArg, hVec) / muVal - rHat.
-    LOCAL eMag TO eVec:MAG.
-
-    IF NOT vecIsOk(eVec) OR NOT isFiniteVal(eMag) { RETURN badList. }
-
-    IF eMag < 0.000001 {
-        RETURN List(rMag, 0, rHat, hHat, TRUE).
-    }
-    IF eMag >= 0.995 { RETURN badList. }
-
-    LOCAL rpVal TO pSem / (1 + eMag).
-    LOCAL energy TO vMag * vMag / 2 - muVal / rMag.
-    IF NOT isFiniteVal(rpVal) OR rpVal <= 0 { RETURN badList. }
-    IF NOT isFiniteVal(energy) OR energy >= 0 { RETURN badList. }
-
-    LOCAL smaVal TO -muVal / (2 * energy).
-    LOCAL periodArg TO smaVal * smaVal * smaVal / muVal.
-    IF NOT isFiniteVal(periodArg) OR periodArg <= 0 { RETURN badList. }
-    LOCAL periodVal TO 2 * CONSTANT:PI * SQRT(periodArg).
-    IF NOT isFiniteVal(periodVal) OR periodVal <= 0 { RETURN badList. }
-
-    LOCAL eHat TO eVec:NORMALIZED.
-    IF NOT vecIsOk(eHat) { RETURN badList. }
-
-    LOCAL cosNu TO clamp(VDOT(eHat, rHat), -1, 1).
-    LOCAL nuDeg TO ARCCOS(cosNu).
-    IF VDOT(velArg, rHat) < 0 { SET nuDeg TO 360 - nuDeg. }
-
-    LOCAL eFacArg TO (1 - eMag) / (1 + eMag).
-    IF NOT isFiniteVal(eFacArg) { RETURN badList. }
-    LOCAL eFac TO SQRT(MAX(0.000001, eFacArg)).
-    LOCAL eAnDeg TO normDeg360(2 * ARCTAN2(eFac * SIN(nuDeg / 2), COS(nuDeg / 2))).
-    LOCAL mDeg TO normDeg360(eAnDeg - (180 / CONSTANT:PI) * eMag * SIN(eAnDeg)).
-
-    LOCAL toDeg TO 360 - mDeg.
-    IF toDeg >= 360 { SET toDeg TO 0. }
-    IF toDeg < 0 { SET toDeg TO 0. }
-
-    LOCAL toPeSec TO toDeg / 360 * periodVal.
-    IF NOT isFiniteVal(toPeSec) OR toPeSec < 0 { RETURN badList. }
-
-    RETURN List(rpVal, toPeSec, eHat, hHat, TRUE).
-}
-
-// ==========================================================================
-// Поиск времени пересечения орбиты с плоскостью (нормаль = planeNormal).
-// Использует бисекцию. Возвращает время в секундах от текущего момента.
-// ==========================================================================
-FUNCTION findPlaneCrossTime { PARAMETER planeNormal. PARAMETER minTime. PARAMETER periodSec.
-    LOCAL curUT TO TIME:SECONDS.
-    LOCAL stepSec TO MAX(5, periodSec / 48).
-
-    LOCAL timeA TO minTime.
-    LOCAL projA TO VDOT(bodyPosAt(timeA), planeNormal).
-
-    LOCAL bestTime TO timeA.
-    LOCAL bestAbsVal TO ABS(projA).
-
-    LOCAL timeB TO timeA + stepSec.
-    LOCAL limitT TO minTime + periodSec + stepSec.
-
-    UNTIL timeB > limitT {
-        LOCAL posB TO bodyPosAt(timeB).
-        LOCAL projB TO VDOT(posB, planeNormal).
-
-        IF ABS(projB) < bestAbsVal {
-            SET bestAbsVal TO ABS(projB).
-            SET bestTime TO timeB.
-        }
-
-        IF (projA >= 0 AND projB < 0) OR (projA < 0 AND projB >= 0) {
-            LOCAL lowT TO timeA.
-            LOCAL highT TO timeB.
-            LOCAL lowProj TO projA.
-            LOCAL bisectIdx TO 0.
-
-            UNTIL bisectIdx >= 20 OR (highT - lowT) < 0.5 {
-                LOCAL midT TO (lowT + highT) / 2.
-                LOCAL posRawM TO POSITIONAT(SHIP, TIMESTAMP(curUT + midT)).
-                LOCAL bodyPosM TO BODY:POSITION.
-                LOCAL posM TO posRawM.
-                IF vecIsOk(bodyPosM) AND bodyPosM:MAG > 1 {
-                    SET posM TO posRawM - bodyPosM.
-                }
-                LOCAL projM TO VDOT(posM, planeNormal).
-
-                IF (lowProj >= 0 AND projM < 0) OR (lowProj < 0 AND projM >= 0) {
-                    SET highT TO midT.
-                } ELSE {
-                    SET lowT TO midT.
-                    SET lowProj TO projM.
-                }
-                SET bisectIdx TO bisectIdx + 1.
-            }
-
-            RETURN (lowT + highT) / 2.
-        }
-
-        SET timeA TO timeB.
-        SET projA TO projB.
-        SET timeB TO timeB + stepSec.
-        WAIT 0.
+    if dt > 0.001 {
+        set derivative to (error - prevError) / dt.
     }
 
-    RETURN bestTime.
-}
-
-// ==========================================================================
-// Калибровка реальных осей ноды.
-// Нода должна быть уже создана и добавлена (например с NORMAL=1).
-// Возвращает List(realRadial, realNormal, realPrograde).
-// ==========================================================================
-FUNCTION calibrateNodeAxes {
-    IF NOT HASNODE {
-        RETURN List(V(0, 0, 0), V(0, 0, 0), V(0, 0, 0)).
-    }
-
-    SET NEXTNODE:RADIALOUT TO 0.
-    SET NEXTNODE:NORMAL TO 0.
-    SET NEXTNODE:PROGRADE TO 0.
-    WAIT 0.1.
-
-    SET NEXTNODE:NORMAL TO 1.
-    WAIT 0.1.
-    LOCAL realNormal TO NEXTNODE:DELTAV:NORMALIZED.
-
-    SET NEXTNODE:NORMAL TO 0.
-    SET NEXTNODE:PROGRADE TO 1.
-    WAIT 0.1.
-    LOCAL realPrograde TO NEXTNODE:DELTAV:NORMALIZED.
-
-    SET NEXTNODE:PROGRADE TO 0.
-    SET NEXTNODE:RADIALOUT TO 1.
-    WAIT 0.1.
-    LOCAL realRadial TO NEXTNODE:DELTAV:NORMALIZED.
-
-    RETURN List(realRadial, realNormal, realPrograde).
-}
-
-// Позиция корабля в момент через deltaSec секунд, ОТ ЦЕНТРА ТЕЛА
-FUNCTION bodyPosAt { PARAMETER deltaSec.
-    LOCAL rawPos TO POSITIONAT(SHIP, TIMESTAMP(TIME:SECONDS + deltaSec)).
-    LOCAL bodyPos TO BODY:POSITION.
-    IF vecIsOk(bodyPos) AND bodyPos:MAG > 1 {
-        RETURN rawPos - bodyPos.
-    }
-    RETURN rawPos.
+    local output to kp * error + kd * derivative.
+    return LIST(output, error).
 }

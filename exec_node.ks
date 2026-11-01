@@ -1,120 +1,105 @@
+@lazyglobal off.
+
 // exec_node.ks
-RUN utils.
-SAS OFF.
+parameter targetNode is nextnode.
 
-FUNCTION getAlignmentAngle { PARAMETER nd.
-    LOCAL shipVec TO SHIP:FACING:FOREVECTOR.
-    IF nd:DELTAV:MAG < 0.01 { RETURN 0. }
-    LOCAL targetVec TO nd:DELTAV:NORMALIZED.
-    LOCAL dotVal TO VDOT(shipVec, targetVec).
-    SET dotVal TO clamp(dotVal, -1, 1).
-    RETURN ARCCOS(dotVal).
-}
+run utils.
 
-// CLEARSCREEN.
-PRINT "=== Maneuver Node Execution ===".
-
-IF not hasnode {
-    PRINT "No maneuver nodes found! Exiting.".
-    SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
-    EXIT.
-}
-
-PRINT "Node found. Required dV: " + ROUND(nextnode:DELTAV:MAG, 2) + " m/s".
-
-SET accel TO MAX(0.1, SHIP:MAXTHRUST / SHIP:MASS).
-SET burnTime TO nextnode:DELTAV:MAG / accel.
-SET startBurnETA TO (burnTime / 2) + 5.
-PRINT "Estimated burn time: " + ROUND(burnTime, 1) + "s".
-PRINT "Starting burn at T-" + ROUND(startBurnETA, 1) + "s".
-
-// Разворот ДО варпа
-LOCK STEERING TO nextnode:DELTAV.
-PRINT "Aligning to burn vector...".
-
-SET alignStart TO TIME:SECONDS.
-UNTIL getAlignmentAngle(nextnode) < 2 OR (TIME:SECONDS - alignStart > 120) OR not hasnode {
-    WAIT 0.5.
-}
-
-IF not hasnode {
-    PRINT "Node disappeared during alignment. Exiting.".
-    UNLOCK STEERING.
-    EXIT.
-}
-
-IF getAlignmentAngle(nextnode) >= 2 {
-    PRINT "WARNING: Align timeout (angle=" + ROUND(getAlignmentAngle(nextnode), 1) + "deg). Proceeding.".
-} ELSE {
-    PRINT "Aligned (angle=" + ROUND(getAlignmentAngle(nextnode), 2) + "deg).".
-}
-
-// Варп только после выравнивания
-IF nextnode:ETA > startBurnETA + 30 {
-    PRINT "Warping to burn start...".
-    SET WARP TO 3.
-    WAIT UNTIL nextnode:ETA <= startBurnETA + 30 OR not hasnode.
-    SET WARP TO 0.
-    IF not hasnode {
-        PRINT "Node disappeared during warp. Exiting.".
-        UNLOCK STEERING.
-        EXIT.
-    }
-    IF getAlignmentAngle(nextnode) >= 2 {
-        PRINT "Re-aligning after warp...".
-        SET alignStart TO TIME:SECONDS.
-        UNTIL getAlignmentAngle(nextnode) < 2 OR (TIME:SECONDS - alignStart > 60) OR not hasnode {
-            WAIT 0.5.
+function execNodeExists { parameter eNode.
+    for nd in ALLNODES {
+        if nd = eNode {
+            return true.
         }
     }
+    return false.
 }
 
-// Финальная проверка
-IF not hasnode {
-    PRINT "Node disappeared. Exiting.".
-    UNLOCK STEERING.
-    EXIT.
-}
-
-SET alignStart TO TIME:SECONDS.
-UNTIL getAlignmentAngle(nextnode) < 2 OR (TIME:SECONDS - alignStart > 30) OR not hasnode {
-    WAIT 0.1.
-}
-
-IF not hasnode {
-    PRINT "Node disappeared. Exiting.".
-    UNLOCK STEERING.
-    EXIT.
-}
-
-IF getAlignmentAngle(nextnode) >= 2 {
-    PRINT "WARNING: Final angle=" + ROUND(getAlignmentAngle(nextnode), 1) + "deg. Proceeding.".
-}
-
-WAIT UNTIL nextnode:ETA <= startBurnETA OR not hasnode.
-IF not hasnode {
-    PRINT "Node disappeared. Exiting.".
-    UNLOCK STEERING.
-    EXIT.
-}
-
-PRINT "Burning...".
-UNTIL not hasnode OR nextnode:DELTAV:MAG <= 0.5 {
-    IF nextnode:DELTAV:MAG > 10 {
-        SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 1.
-    } ELSE IF nextnode:DELTAV:MAG > 2 {
-        SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.3.
-    } ELSE {
-        SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.1.
+function sumAvThrust {
+    // Реальная тяга активных двигателей с учётом thrustLimit, без включения
+    SET totalThrust TO 0.
+    FOR eng IN SHIP:ENGINES {
+        IF eng:IGNITION AND NOT eng:FLAMEOUT {
+            SET totalThrust TO totalThrust + eng:AVAILABLETHRUST.
+        }
     }
-    WAIT 0.05.
+    IF totalThrust <= 0.01 { return SHIP:MAXTHRUST. }
+    return totalThrust.
 }
 
-SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
-IF hasnode {
-    REMOVE nextnode.
-    PRINT "Node executed successfully!".
+
+function execMain {
+    local nodeTime to targetNode:TIME.
+    local dvVec to targetNode:DELTAV.
+    local dvMag to dvVec:MAG.
+
+    if not isFiniteVal(dvMag) or dvMag < 0.1 {
+        remove targetNode.
+        return true.
+    }
+
+    local accel to MAX(0.1, sumAvThrust() / MAX(0.001, SHIP:MASS) * 0.95).
+    local burnTime to MAX(1, dvMag / accel * 1.10).
+    local startEta to burnTime / 2.
+
+    set WARP to 0.
+    set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.
+
+    local faceVec to safeLookDirUp(dvVec, SHIP:UP:FOREVECTOR).
+    lock steering to faceVec.
+
+    print "NODE dV=" + ROUND(dvMag, 1) +
+          " burn=" + ROUND(burnTime, 1) +
+          " T-" + ROUND(startEta, 1).
+
+    until targetNode:ETA <= startEta {
+        if targetNode:ETA > 600 {
+            set WARP to 4.
+        } else if targetNode:ETA > 120 {
+            set WARP to 2.
+        } else {
+            set WARP to 0.
+        }
+
+        set faceVec to safeLookDirUp(dvVec, SHIP:UP:FOREVECTOR).
+        wait 0.2.
+    }
+
+    set WARP to 0.
+    wait 0.5.
+
+    set faceVec to safeLookDirUp(dvVec, SHIP:UP:FOREVECTOR).
+    wait 0.5.
+
+    lock throttle to 1.
+
+    local burnStart to TIME:SECONDS.
+    local doneBurn to false.
+
+    until doneBurn {
+        if not execNodeExists(targetNode) {
+            set doneBurn to true.
+        } else {
+            local remDv to targetNode:DELTAV:MAG.
+
+            if remDv < 0.5 {
+                set doneBurn to true.
+            } else if TIME:SECONDS - burnStart > burnTime * 1.5 {
+                set doneBurn to true.
+            } else {
+                wait 0.1.
+            }
+        }
+    }
+
+    set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.
+    unlock throttle.
+    unlock steering.
+    set SAS to false.
+
+    execRemoveByTime(nodeTime).
+    wait 0.5.
+
+    return true.
 }
 
-UNLOCK STEERING.
-SAS ON.
+execMain().
