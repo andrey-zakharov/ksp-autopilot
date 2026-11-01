@@ -16,7 +16,7 @@ function execNodeExists { parameter eNode.
 
 function sumAvThrust {
     // Реальная тяга активных двигателей с учётом thrustLimit, без включения
-    SET totalThrust TO 0.
+    local totalThrust TO 0.
     FOR eng IN SHIP:ENGINES {
         IF eng:IGNITION AND NOT eng:FLAMEOUT {
             SET totalThrust TO totalThrust + eng:AVAILABLETHRUST.
@@ -26,6 +26,12 @@ function sumAvThrust {
     return totalThrust.
 }
 
+function getAlignmentAngle { PARAMETER nd.
+    IF nd:DELTAV:MAG < 0.01 { RETURN 0. }
+    LOCAL dotVal TO VDOT(SHIP:FACING:FOREVECTOR, nd:DELTAV:NORMALIZED).
+    SET dotVal TO clamp(dotVal, -1, 1).
+    RETURN ARCCOS(dotVal).
+}
 
 function execMain {
     local nodeTime to targetNode:TIME.
@@ -43,7 +49,7 @@ function execMain {
 
     set WARP to 0.
     set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.
-
+    // Разворот ДО варпа
     local faceVec to safeLookDirUp(dvVec, SHIP:UP:FOREVECTOR).
     lock steering to faceVec.
 
@@ -51,7 +57,12 @@ function execMain {
           " burn=" + ROUND(burnTime, 1) +
           " T-" + ROUND(startEta, 1).
 
-    until targetNode:ETA <= startEta {
+    local alignStart is TIME:SECONDS.
+    until getAlignmentAngle(targetNode) < 1 OR (TIME:SECONDS - alignStart > 120) OR not hasnode {
+        wait 0.5.
+    }
+    // Варп только после выравнивания
+    until targetNode:ETA <= startEta + 30 {
         if targetNode:ETA > 600 {
             set WARP to 4.
         } else if targetNode:ETA > 120 {
@@ -65,11 +76,16 @@ function execMain {
     }
 
     set WARP to 0.
-    wait 0.5.
-
     set faceVec to safeLookDirUp(dvVec, SHIP:UP:FOREVECTOR).
+    if getAlignmentAngle(targetNode) >= 2 {
+        PRINT "Re-aligning after warp...".
+        SET alignStart TO TIME:SECONDS.
+        UNTIL getAlignmentAngle(targetNode) < 1 OR (TIME:SECONDS - alignStart > 60) OR not hasnode {
+            WAIT 0.5.
+        }
+    }
     wait 0.5.
-
+    WAIT UNTIL targetNode:ETA <= startEta OR not hasnode.
     lock throttle to 1.
 
     local burnStart to TIME:SECONDS.
@@ -96,7 +112,7 @@ function execMain {
     unlock steering.
     set SAS to false.
 
-    execRemoveByTime(nodeTime).
+    remove targetNode.
     wait 0.5.
 
     return true.

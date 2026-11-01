@@ -112,6 +112,43 @@ function estimateTurnTime { parameter angleDeg. parameter massValue.
     return MAX(1, timeValue).
 }
 
+function safeLookDirUp { parameter dirV. parameter upV.
+    local fV to dirV.
+    local uV to upV.
+
+    if not vecIsOk(fV) or fV:MAG < 0.000001 {
+        set fV to uV.
+    } else {
+        set fV to fV:NORMALIZED.
+    }
+
+    if not vecIsOk(uV) or uV:MAG < 0.000001 {
+        set uV to V(0, 1, 0).
+    } else {
+        set uV to uV:NORMALIZED.
+    }
+
+    if not vecIsOk(fV) or fV:MAG < 0.000001 {
+        set fV to V(0, 0, 1).
+    }
+
+    if ABS(VDOT(fV, uV)) > 0.9999 {
+        local sV to VCRS(fV, V(0, 1, 0)).
+
+        if not vecIsOk(sV) or sV:MAG < 0.000001 {
+            set sV to VCRS(fV, V(1, 0, 0)).
+        }
+
+        if vecIsOk(sV) and sV:MAG > 0.000001 {
+            set uV to (uV + sV:NORMALIZED * 0.02):NORMALIZED.
+        } else {
+            set uV to V(0, 1, 0).
+        }
+    }
+
+    return LOOKDIRUP(fV, uV).
+}
+
 // --------------------------------------------------------------------------
 // Плавный поворот направления к целевому вектору
 // --------------------------------------------------------------------------
