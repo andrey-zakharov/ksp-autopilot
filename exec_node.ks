@@ -1,119 +1,167 @@
-@lazyglobal off.
+@LAZYGLOBAL ON.
 
-// exec_node.ks
-parameter targetNode is nextnode.
+parameter targetNode is 0.
 
-run utils.
-
-function execNodeExists { parameter eNode.
-    for nd in ALLNODES {
-        if nd = eNode {
+function execAlive { parameter nd.
+    for n in ALLNODES {
+        if n = nd {
             return true.
         }
     }
     return false.
 }
 
-function sumAvThrust {
-    // Реальная тяга активных двигателей с учётом thrustLimit, без включения
-    local totalThrust TO 0.
-    FOR eng IN SHIP:ENGINES {
-        IF eng:IGNITION AND NOT eng:FLAMEOUT {
-            SET totalThrust TO totalThrust + eng:AVAILABLETHRUST.
-        }
-    }
-    IF totalThrust <= 0.01 { return SHIP:MAXTHRUST. }
-    return totalThrust.
+function execAim { parameter aimV.
+    local aimH to aimV:NORMALIZED.
+    local tEnd to TIME:SECONDS + 20.
+
+    wait until VANG(SHIP:FACING:FOREVECTOR, aimH) <= 1 or TIME:SECONDS > tEnd.
+    PRINT "Aligned (angle=" + ROUND(VANG(SHIP:FACING:FOREVECTOR, aimH), 2) + "deg).".
 }
 
-function getAlignmentAngle { PARAMETER nd.
-    IF nd:DELTAV:MAG < 0.01 { RETURN 0. }
-    LOCAL dotVal TO VDOT(SHIP:FACING:FOREVECTOR, nd:DELTAV:NORMALIZED).
-    SET dotVal TO clamp(dotVal, -1, 1).
-    RETURN ARCCOS(dotVal).
+function getStageBurnTime { parameter stageNum. parameter needDeltaV.
+
+
+}
+
+function sumBurnTime { parameter needDeltaV.
+    local remainDeltaV to needDeltaV.
+    local currentStage to SHIP:STAGENUM.
+    local burnTime to 0.
+    until remainDeltaV <= 0 or currentStage < 0 {
+        local thr to 0.
+        local isp to 0.
+        local totalEngines to 0.
+        for e in SHIP:ENGINES {
+            if e:STAGE = currentStage and not e:FLAMEOUT {
+                set thr to thr + e:AVAILABLETHRUST.
+                set isp to isp + e:visp.
+                set totalEngines to totalEngines + 1.
+            }
+        }
+
+        if thr <= 0.01 {
+            set thr to SHIP:MAXTHRUST.
+        }
+        print currentStage + " " + totalEngines + " " + thr + " " + isp.
+
+        set isp to isp / totalEngines.
+        local ve to isp * CONSTANT:g0.
+        local accel to MAX(0.1, thr / MAX(0.001, SHIP:MASS) * 0.95). // approx, as counts all ship mass, not staged
+        local dvMag to MIN(remainDeltaV, SHIP:STAGEDELTAV(currentStage):CURRENT).
+        set burnTime to burnTime + MAX(1, (ve / accel) * (1 - (1 / (CONSTANT:E ^ (dvMag / ve))))).
+        set remainDeltaV to remainDeltaV - dvMag.
+        set currentStage to currentStage - 1.
+        print burnTime + " " + remainDeltaV.
+    }
+    print sumBurnTime2(needDeltaV).
+    return burnTime.
+}
+
+function sumBurnTime2 { parameter needDeltaV.
+    local remainDeltaV to needDeltaV.
+    local currentStage to SHIP:STAGENUM.
+    local burnTime to 0.
+    until remainDeltaV <= 0 or currentStage < 0 {
+        local sdv to SHIP:STAGEDELTAV(currentStage).
+        print "stage: " + currentStage + " " + sdv:CURRENT + " " + sdv:DURATION.
+        // 940 m/s
+        //stage: 3 240.063385009766 10.1149234771729
+        //stage: 2 2215.4560546875 563.882385253906
+        //stage: 1 2330.35424804688 225.552947998047
+        //stage: 0 0 0
+
+        if sdv:CURRENT >= remainDeltaV {
+            set burnTime to burnTime + (remainDeltaV * sdv:DURATION / sdv:CURRENT).
+            set remainDeltaV to 0.
+        } else { // not enough fuel in current stage
+            set remainDeltaV to remainDeltaV - sdv:CURRENT.
+            set burnTime to burnTime + sdv:DURATION.
+        }
+        print burnTime + " " + remainDeltaV.
+        
+        set currentStage to currentStage - 1.
+    }
+    return burnTime.
 }
 
 function execMain {
-    local nodeTime to targetNode:TIME.
-    local dvVec to targetNode:DELTAV.
-    local dvMag to dvVec:MAG.
-
-    if not isFiniteVal(dvMag) or dvMag < 0.1 {
-        remove targetNode.
-        return true.
+    sas off.
+    if targetNode = 0 {
+        if not HASNODE {
+            print "No node.".
+            return false.
+        }
+        set targetNode to NEXTNODE.
     }
 
-    local accel to MAX(0.1, sumAvThrust() / MAX(0.001, SHIP:MASS) * 0.95).
-    local burnTime to MAX(1, dvMag / accel * 1.10).
-    local startEta to burnTime / 2.
+    if not execAlive(targetNode) {
+        print "No node.".
+        return false.
+    }
+
+    local dvMag to targetNode:DELTAV:MAG.
+
+    if dvMag <> dvMag or dvMag < 0.1 {
+        print "Bad node dV.".
+        return false.
+    }
+
+    local burnTime to sumBurnTime(dvMag).
+    local startEta to burnTime / 2 + MAX(2, MIN(20, SHIP:MASS / 10)).
 
     set WARP to 0.
     set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.
-    // Разворот ДО варпа
-    local faceVec to safeLookDirUp(dvVec, SHIP:UP:FOREVECTOR).
-    lock steering to faceVec.
+    unlock THROTTLE.
+    unlock STEERING.
+
+    lock STEERING to targetNode:DELTAV.
+    execAim(targetNode:DELTAV).
 
     print "NODE dV=" + ROUND(dvMag, 1) +
           " burn=" + ROUND(burnTime, 1) +
           " T-" + ROUND(startEta, 1).
 
-    local alignStart is TIME:SECONDS.
-    until getAlignmentAngle(targetNode) < 1 OR (TIME:SECONDS - alignStart > 120) OR not hasnode {
-        wait 0.5.
+    kuniverse:timewarp:warpto(targetNode:time - startEta).
+
+    if not execAlive(targetNode) {
+        print "Node disappeared.".
+        unlock STEERING.
+        return false.
     }
-    // Варп только после выравнивания
-    until targetNode:ETA <= startEta + 30 {
-        if targetNode:ETA > 600 {
-            set WARP to 4.
-        } else if targetNode:ETA > 120 {
-            set WARP to 2.
+
+    execAim(targetNode:DELTAV).
+
+    if not execAlive(targetNode) {
+        unlock STEERING.
+        return false.
+    }
+
+    wait until time:seconds >= targetNode:time - burnTime / 2.
+    print "Burning...".
+
+    until not execAlive(targetNode) or targetNode:DELTAV:MAG <= 0.5 {
+        if targetNode:DELTAV:MAG > 10 {
+            set SHIP:CONTROL:PILOTMAINTHROTTLE to 1.
+        } else if targetNode:DELTAV:MAG > 2 {
+            set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.3.
         } else {
-            set WARP to 0.
+            set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.1.
         }
 
-        set faceVec to safeLookDirUp(dvVec, SHIP:UP:FOREVECTOR).
-        wait 0.2.
-    }
-
-    set WARP to 0.
-    set faceVec to safeLookDirUp(dvVec, SHIP:UP:FOREVECTOR).
-    if getAlignmentAngle(targetNode) >= 2 {
-        PRINT "Re-aligning after warp...".
-        SET alignStart TO TIME:SECONDS.
-        UNTIL getAlignmentAngle(targetNode) < 1 OR (TIME:SECONDS - alignStart > 60) OR not hasnode {
-            WAIT 0.5.
-        }
-    }
-    wait 0.5.
-    WAIT UNTIL targetNode:ETA <= startEta OR not hasnode.
-    lock throttle to 1.
-
-    local burnStart to TIME:SECONDS.
-    local doneBurn to false.
-
-    until doneBurn {
-        if not execNodeExists(targetNode) {
-            set doneBurn to true.
-        } else {
-            local remDv to targetNode:DELTAV:MAG.
-
-            if remDv < 0.5 {
-                set doneBurn to true.
-            } else if TIME:SECONDS - burnStart > burnTime * 1.5 {
-                set doneBurn to true.
-            } else {
-                wait 0.1.
-            }
-        }
+        wait 0.05.
     }
 
     set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.
-    unlock throttle.
-    unlock steering.
-    set SAS to false.
+    unlock THROTTLE.
 
-    remove targetNode.
-    wait 0.5.
+    if execAlive(targetNode) {
+        remove targetNode.
+        print "Node executed successfully!".
+    }
+
+    unlock STEERING.
+    set SAS to true.
 
     return true.
 }
