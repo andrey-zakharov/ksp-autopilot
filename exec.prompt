@@ -1,0 +1,85 @@
+Ты опытный программист kOS 1.6 для KSP. Напиши скрипт exec_node.ks.
+
+Стиль:
+- языковые слова function, if, until, set, local, return, print, run, lock, unlock, wait, exit — строчными;
+- встроенные объекты и функции kOS: SHIP, NEXTNODE, HASNODE, WARP, TIME, SAS — заглавными;
+- короткие имена переменных, не конфликтующие с встроенными именами kOS;
+- первая строка: @LAZYGLOBAL ON.
+- если парсер не примет директиву в нижнем регистре, оставь @LAZYGLOBAL ON.
+- не создавай локальных переменных которые нужны только один раз
+
+Требуемое поведение exec_node.ks:
+
+1. Скрипт принимает параметр targetNode равный nextnode по умолчанию.
+
+2. Оберни основную логику в функцию execMain и в конце вызови:
+   execMain().
+
+3. В начале execMain:
+   - если нет ноды, или они не валидна (MAG < 0.1) , напечатать сообщение об отсутствии ноды и вернуть false;
+
+5. Оценить ускорение, посчитать доступную тягу для корабля
+   local accel
+
+6. Оценить время прожига, посчитать формулой циолковского:
+   local burnTime
+
+7. Оценить момент старта прожига:
+   local startEta to (burnTime / 2) + marginTime.
+   где marginTime - можно посчитать по массе корабля, как время на корректировку курса
+
+8. Подготовить корабль:
+   - set WARP to 0;
+   - set SHIP:CONTROL:PILOTMAINTHROTTLE to 0;
+   - unlock THROTTLE;
+   - unlock STEERING;
+   - lock steering to node:deltav.
+   - выровнять корабль, с точностью 1 градус
+
+9. Напечатать информацию о ноде, например:
+   print "NODE dV=" + ROUND(dvMag, 1) + " burn=" + ROUND(burnTime, 1) + " T-" + ROUND(startEta, 1).
+
+10. Дождаться момента старта прожига:
+    until not HASNODE or targetNode:ETA <= startEta:
+        - если targetNode:ETA > 600, set WARP to 4;
+        - иначе если targetNode:ETA > 120, set WARP to 2;
+        - иначе set WARP to 0;
+        - wait 0.2.
+
+11. После ожидания:
+
+    - set WARP to 0;
+    - выровнять корабль, с точностью 1 градус
+    - проверить существование ноды
+
+12. Напечатать:
+    print "Burning...".
+
+13. Цикл горения:
+    until not HASNODE or targetNode:DELTAV:MAG <= 0.5:
+        - взять остаточный dV:
+          local remDv to targetNode:DELTAV:MAG;
+        - если remDv > 10:
+            set SHIP:CONTROL:PILOTMAINTHROTTLE to 1;
+        - иначе если remDv > 2:
+            set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.3;
+        - иначе:
+            set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.1;
+        - wait 0.05.
+
+14. После цикла горения:
+    set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.
+
+15. Если после прожига still HASNODE:
+    - remove targetNode;
+    - print "Node executed successfully!".
+
+16. В конце:
+    - unlock STEERING;
+    - set SAS to true;
+    - return true.
+
+17. Не использовать removeNodes().
+18. Не удалять все ноды подряд.
+19. Не добавлять проверку своей/чужой ноды по времени — это простая старая версия, работающая с targetNode.
+20. Скрипт должен быть компактным.
