@@ -1,314 +1,386 @@
 // ==========================================================================
 // land.ks — Главный скрипт посадки
 // ==========================================================================
-
-PARAMETER landLat IS 0.
-PARAMETER landLng IS 0.
-PARAMETER maxSlope IS 5.
+parameter landLat is 0.
+parameter landLng is 0.
+parameter maxSlope is 5.
 
 // Параметры фаз
-PARAMETER touchdownSpeed IS 0.
-PARAMETER finalAlt IS 100.
-PARAMETER finalApproachSpeed IS 10.
-PARAMETER horizStartAlt IS 20000.
-PARAMETER brakeSafetyMargin IS 1.25.
-PARAMETER brakeLeadTime IS 1.1.
-PARAMETER terrainMargin IS 5.
-PARAMETER groundClearance IS 10.
-PARAMETER maxIgniteTiltDeg IS 15.
-PARAMETER suicideTiltDeg IS 8.
+parameter touchdownSpeed is 0.
+parameter finalApproachSpeed is 10.
+parameter horizStartAlt is 20000.
+parameter brakeLeadTime is 1.1.
+parameter groundClearance is 10.
+parameter maxIgniteTiltDeg is 15.
+parameter suicideTiltDeg is 8.
 
 // Общие параметры
-PARAMETER maxSlewDeg IS 10.      
-PARAMETER coastLeadTime IS 20.
-PARAMETER maxWarpAim IS 6.
-PARAMETER maxWarpRate IS 2.
+parameter maxSlewDeg is 10.
+parameter coastLeadTime is 20.
+parameter maxWarpAim is 6.
+parameter maxWarpRate is 2.
+// Минимальная горизонтальная скорость, которую имеет смысл гасить.
+// Ниже этого порога не тратим топливо — просто выравниваемся вертикально.
+parameter minHorizBrake is 3.0.
+// Максимальный наклон от вертикали у самой точки торможения (градусы).
+parameter maxTiltAtBrake is 3.
 
-
-RUN utils.
+run utils.
 
 // ==========================================================================
 // ГЛОБАЛЬНОЕ СОСТОЯНИЕ ДЛЯ ОБМЕНА МЕЖДУ СКРИПТАМИ
 // ==========================================================================
-SET throttleCmd TO 0.
-SET steerFacing TO SHIP:FACING.
-SET currentWarp TO 0.
-SET lastGlobalSec TO TIME:SECONDS. 
+set throttleCmd to 0.
+set steerFacing to SHIP:FACING.
+set currentWarp to 0.
+set lastGlobalSec to TIME:SECONDS.
 
-// Переменные состояния полета
-SET altAGL TO 0.
-SET velVert TO 0.
-SET velHorizMag TO 0.
-SET gravAcc TO 0.001.
-SET thrustAcc TO 0.01.
-SET twrNow TO 1.
-SET brakeAlt TO -1.
-SET timeToBrake TO 9999.
-SET faceRate TO 0.
-SET prevFaceVec TO SHIP:FACING:FOREVECTOR.
+// Переменные состояния полёта
+set altAGL to 0.
+set velVert to 0.
+set velHorizMag to 0.
+set velHorizVec to V(0, 0, 0).
+set gravAcc to 0.001.
+set thrustAcc to 0.01.
+set twrNow to 1.
+set brakeAlt to -1.
+set timeToBrake to 9999.
+set faceRate to 0.
 
 // Координаты площадки
-SET siteLat TO landLat.
-SET siteLng TO landLng.
-SET siteTerrain TO 0.
-SET nextDiagTimer TO 0.
+set siteLat to landLat.
+set siteLng to landLng.
+set siteTerrain to 0.
+set nextDiagTimer to 0.
+
+set phase to "".
+
+local doDeorbitCorrection is false.
 
 // ==========================================================================
 // ФУНКЦИИ МОНИТОРИНГА
 // ==========================================================================
+function flightState {
+    local nowSec to TIME:SECONDS.
+    local rawDt to nowSec - lastGlobalSec.
 
-FUNCTION flightState {
-    LOCAL nowSec TO TIME:SECONDS.
-    LOCAL rawDt TO nowSec - lastGlobalSec.
-    
-    SET altAGL TO MAX(0, SHIP:ALTITUDE - SHIP:GEOPOSITION:TERRAINHEIGHT).
-    SET upVector TO SHIP:UP:FOREVECTOR.
-    
-    SET velSurf TO SHIP:VELOCITY:SURFACE.
-    SET velVert TO VDOT(velSurf, upVector).
-    SET velHoriz TO velSurf - (velVert * upVector).
-    SET velHorizMag TO velHoriz:MAG.
-    SET velVertAbs TO ABS(velVert).
+    set altAGL to MAX(0, SHIP:ALTITUDE - SHIP:GEOPOSITION:TERRAINHEIGHT).
 
-    SET gravAcc TO safeDiv(BODY:MU, (BODY:RADIUS + SHIP:ALTITUDE)^2, 0.001).
-    
-    SET thrustAvail TO SHIP:AVAILABLETHRUST.
-    IF thrustAvail <= 0.01 { SET thrustAvail TO SHIP:MAXTHRUST. }
-    
-    SET shipMass TO MAX(0.001, SHIP:MASS).
-    SET thrustAcc TO MAX(0.01, thrustAvail / shipMass).
-    SET twrNow TO thrustAcc / MAX(0.001, gravAcc).
-    
-    SET faceRate TO VANG(SHIP:FACING:FOREVECTOR, prevFaceVec) / MAX(0.05, rawDt).
-    SET prevFaceVec TO SHIP:FACING:FOREVECTOR.
+    local upVector to SHIP:UP:FOREVECTOR.
+    local velSurf to SHIP:VELOCITY:SURFACE.
+    set velVert to VDOT(velSurf, upVector).
 
-    SET brakeAlt TO -1.
-    SET timeToBrake TO 9999.
+    local velHoriz to velSurf - (velVert * upVector).
+    set velHorizMag to velHoriz:MAG.
+    set velHorizVec to velHoriz.
 
-    // Дерейтим тягу: реальное торможение может быть хуже идеального расчета.
-    // Особенно важно при TWR около 2.0-2.5.
-    LOCAL netAcc IS MAX(0.05, thrustAcc * 0.90 - gravAcc).
+    local velVertAbs to ABS(velVert).
 
-    IF velVert < 0 {
-        LOCAL brakeDist IS (velVertAbs * velVertAbs - touchdownSpeed * touchdownSpeed) /
-                           (2 * netAcc).
-        IF brakeDist < 0 {
-            SET brakeDist TO 0.
-        }
+    set gravAcc to safeDiv(BODY:MU, (BODY:RADIUS + SHIP:ALTITUDE)^2, 0.001).
 
-        // Обязательно добавляем groundClearance, потому что suicide_burn тормозит не до нуля,
-        // а до высоты clearance.
-        SET brakeAlt TO brakeDist * brakeSafetyMargin +
+    local thrustAvail to SHIP:AVAILABLETHRUST.
+    if thrustAvail <= 0.01 { set thrustAvail to SHIP:MAXTHRUST. }
+
+    local shipMass to MAX(0.001, SHIP:MASS).
+    set thrustAcc to MAX(0.01, thrustAvail / shipMass).
+    set twrNow to thrustAcc / MAX(0.001, gravAcc).
+
+    set brakeAlt to -1.
+    set timeToBrake to 9999.
+
+    // Дерейтим тягу: реальное торможение может быть хуже идеального расчёта
+    local netAcc to MAX(0.05, thrustAcc * 0.95 - gravAcc).
+
+    if velVert < 0 {
+        local brakeDist to (velVertAbs * velVertAbs - touchdownSpeed * touchdownSpeed) / (2 * netAcc).
+        if brakeDist < 0 { set brakeDist to 0. }
+
+        set brakeAlt to brakeDist +
                         velVertAbs * brakeLeadTime +
-                        terrainMargin +
                         groundClearance.
 
-        SET timeToBrake TO (SQRT(velVertAbs * velVertAbs + 2 * gravAcc * MAX(0, altAGL - brakeAlt)) - velVertAbs) / MAX(0.0001, gravAcc).
+        set timeToBrake to (SQRT(velVertAbs * velVertAbs + 2 * gravAcc * MAX(0, altAGL - brakeAlt)) - velVertAbs) / MAX(0.0001, gravAcc).
     }
 }
 
-FUNCTION printDiag {
-    PRINT "| AGL:" + ROUND(altAGL) + 
-          " vV:" + ROUND(velVert,1) + 
-          " vH:" + ROUND(velHorizMag,1) + 
-          " TWR:" + ROUND(twrNow,2) + 
-          " Thr:" + ROUND(throttleCmd*100) + "%" +
+function printDiag {
+    print phase + "| AGL:" + ROUND(altAGL) +
+          " vV:" + ROUND(velVert, 1) +
+          " vH:" + ROUND(velHorizMag, 1) +
+          " TWR:" + ROUND(twrNow, 2) +
+          " Thr:" + ROUND(throttleCmd * 100) + "%" +
+          " brakeAlt:" + ROUND(brakeAlt, 1) + "m" +
           " Warp:" + currentWarp.
+}
+
+// ==========================================================================
+// ФАЗА ГОРИЗОНТАЛЬНОГО ТОРМОЖЕНИЯ (замена horizontal_brake)
+// Предиктивный контроль: минимум топлива, ракета не направляется в землю.
+// ==========================================================================
+function horizontalBrake {
+    flightState().
+
+    // Малая горизонталь — не жжём, просто выравниваемся вертикально.
+    // Это даёт время ракете встать носом вверх перед суицидом.
+    if velHorizMag <= minHorizBrake {
+        set throttleCmd to 0.
+        set steerFacing to SHIP:UP:FOREVECTOR.
+        return.
+    }
+
+    // ------------------------------------------------------------
+    // Близость к точке торможения: 0 = далеко, 1 = на месте.
+    // Начинаем ограничивать наклон за 3 высоты торможения.
+    // ------------------------------------------------------------
+    local brakeProx to 0.
+    if brakeAlt > 0 and altAGL <= brakeAlt * 2 {
+        set brakeProx to clamp(1 - (altAGL - brakeAlt) / (brakeAlt * 2), 0, 1).
+    }
+
+    // Максимальный наклон от вертикали:
+    //   далеко от торможения  → 85°
+    //   близко к торможению   → maxTiltAtBrake (≈12°)
+    local maxTilt to 85 * (1 - brakeProx) + maxTiltAtBrake * brakeProx.
+
+    // Направление торможения: противоположно горизонтальной скорости
+    local brakeDir to (-1) * velHorizVec:NORMALIZED.
+
+    // Ограничиваем наклон от вертикали
+    local upDir to SHIP:UP:FOREVECTOR.
+    if VANG(brakeDir, upDir) > maxTilt {
+        local axV to VCRS(upDir, brakeDir).
+        if vecIsOk(axV) and axV:MAG > 0.000001 {
+            set brakeDir to (ANGLEAXIS(maxTilt, axV:NORMALIZED) * upDir):NORMALIZED.
+        } else {
+            set brakeDir to upDir.
+        }
+    }
+    //print maxTilt + " " + ROUND(VANG(brakeDir, upDir), 2).
+
+    // Требуемое ускорение
+    local tGround to 9999.
+    if velVert < -0.1 {
+        set tGround to altAGL / MAX(0.1, ABS(velVert)).
+    }
+    local availBrake to MAX(0.1, thrustAcc * 0.85).
+    local tStop to velHorizMag / availBrake.
+    local urgency to 0.
+    if tGround < 9999 and tStop > 0.1 {
+        set urgency to tStop / MAX(0.1, tGround).
+    }
+
+    local wantAcc to 0.
+    if urgency > 0.8 {
+        set wantAcc to velHorizMag / MAX(0.5, tGround * 0.6).
+    } else {
+        set wantAcc to velHorizMag / MAX(2, tStop * 1.5).
+    }
+    set wantAcc to clamp(wantAcc, 0, thrustAcc * 0.9).
+
+    // Тяга: при малых ускорениях не жжём вообще
+    if wantAcc < 0.1 {
+        set throttleCmd to 0.
+    } else {
+        set throttleCmd to clamp(wantAcc / MAX(0.1, thrustAcc), 0, 1).
+    }
+
+    set steerFacing to safeLookDirUp(brakeDir, SHIP:UP:FOREVECTOR).
 }
 
 // ==========================================================================
 // СТАРТ
 // ==========================================================================
-CLEARSCREEN.
-SET SAS TO FALSE.
-SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
-SET throttleCmd TO 0.
-SET steerFacing TO SHIP:FACING.
+clearscreen.
+sas off.
+set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.
+set throttleCmd to 0.
+set steerFacing to SHIP:FACING.
 
-LOCK THROTTLE TO throttleCmd.
-LOCK STEERING TO steerFacing.
+lock THROTTLE to throttleCmd.
+lock STEERING to steerFacing.
 
 flightState().
 
-PRINT "=== ПОСАДКА ===".
-PRINT "Статус: " + SHIP:STATUS + " AGL=" + ROUND(altAGL).
+print "=== ПОСАДКА ===".
+print "Статус: " + SHIP:STATUS + " AGL=" + ROUND(altAGL).
 
 // 1. Площадка: если есть цель — она уже размещена игроком, поиск не нужен
-IF HASTARGET {
-    SET siteLat TO TARGET:GEOPOSITION:LAT.
-    SET siteLng TO TARGET:GEOPOSITION:LNG.
-    SET siteTerrain TO BODY:GEOPOSITIONLATLNG(siteLat, siteLng):TERRAINHEIGHT.
-    PRINT "Цель: " + TARGET:NAME + " " + ROUND(siteLat,5) + "," + ROUND(siteLng,5).
-} ELSE {
-    RUN find_landing_site(landLat, landLng, maxSlope).
-    SET siteLat TO landingLat.
-    SET siteLng TO landingLng.
-    SET siteTerrain TO landingTerrain.
-    PRINT "Площадка: " + ROUND(siteLat,5) + "," + ROUND(siteLng,5).
+if HASTARGET {
+    set siteLat to TARGET:GEOPOSITION:LAT.
+    set siteLng to TARGET:GEOPOSITION:LNG.
+    set siteTerrain to BODY:GEOPOSITIONLATLNG(siteLat, siteLng):TERRAINHEIGHT.
+    print "Цель: " + TARGET:NAME + " " + ROUND(siteLat, 5) + "," + ROUND(siteLng, 5).
+    set doDeorbitCorrection to true.
+} else {
+    run find_landing_site(landLat, landLng, maxSlope).
+    set siteLat to landingLat.
+    set siteLng to landingLng.
+    set siteTerrain to landingTerrain.
+    print "Площадка: " + ROUND(siteLat, 5) + "," + ROUND(siteLng, 5).
 }
-PRINT "Рельеф цели: " + ROUND(siteTerrain) + " м".
-WAIT 1.
 
-LOCK isLanded TO SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED".
+print "Рельеф цели: " + ROUND(siteTerrain) + " м".
+wait 1.
+
+lock isLanded to SHIP:STATUS = "LANDED" or SHIP:STATUS = "SPLASHED".
+lock fallingDeep to (velVert < 0 and altAGL <= brakeAlt).
 
 // 2. Деорбит (если нужны)
-IF SHIP:ORBIT:PERIAPSIS > 0 AND SHIP:VELOCITY:ORBIT:MAG > 5 {
-    //RUN deorbit_phase(horizStartAlt).
-    RUN deorbit_phase(horizStartAlt, 100, 48, 8, 1, 1.0, 3000).
-    
-    UNLOCK THROTTLE.
-    UNLOCK STEERING.
-    SET SAS TO FALSE.
-    SET steerFacing TO SHIP:FACING.
-    SET prevFaceVec TO steerFacing:FOREVECTOR.
-    LOCK THROTTLE TO throttleCmd.
-    LOCK STEERING TO steerFacing.
-    WAIT 1.
+if SHIP:ORBIT:PERIAPSIS > 0 and SHIP:VELOCITY:ORBIT:MAG > 5 {
+    print "Деорбит: pe=" + ROUND(SHIP:ORBIT:PERIAPSIS) +
+          " v=" + ROUND(SHIP:VELOCITY:ORBIT:MAG, 1).
+    run deorbit_phase(horizStartAlt, 100, 48, 8, 1, 1.0, 3000, doDeorbitCorrection).
+
+    sas off.
+    set steerFacing to SHIP:FACING.
+    lock THROTTLE to throttleCmd.
+    lock STEERING to steerFacing.
+    wait 1.
 }
 
-// 3. Основной цикл посадки
-UNTIL isLanded {
-    
+// ==========================================================================
+// 3. ОСНОВНОЙ ЦИКЛ ПОСАДКИ
+// ==========================================================================
+until isLanded {
     flightState().
-    
-    // Синхронизируем время для суб-скриптов
-    SET lastGlobalSec TO TIME:SECONDS. 
-    
+    set lastGlobalSec to TIME:SECONDS.
+    set phase to "unknown".
+
     // --- Фаза HORIZONTAL ---
-    // Пока есть значимая горизонталь и мы высоко
-    UNTIL isLanded OR
-        velHorizMag <= 1.0 OR
-        altAGL > horizStartAlt OR
-        (velVert < 0 AND altAGL <= brakeAlt) OR
-        altAGL <= finalAlt {
-        
+    until isLanded or
+          velHorizMag <= minHorizBrake or
+          fallingDeep or
+          altAGL <= groundClearance {
+
+        set phase to "horizontal brake".
+
         flightState().
-        RUN horizontal_brake. 
-        
-        IF currentWarp > 0 {
-            SET WARP TO 0.
-            SET currentWarp TO 0.
-            WAIT 0.2.
+        horizontalBrake().
+
+        if currentWarp > 0 {
+            set WARP to 0.
+            set currentWarp to 0.
+            wait 0.2.
         }
-        
-        // Диагностика
-        IF TIME:SECONDS > nextDiagTimer {
-            printDiag().
-            SET nextDiagTimer TO TIME:SECONDS + 2.
-        }
-        
-        WAIT 0.
+
+        wait 0.
     }
 
     // --- Фаза COAST ---
-    UNTIL isLanded OR
-          (velVert < 0 AND altAGL <= brakeAlt) OR
-          altAGL <= finalAlt OR
-          (velHorizMag > 1.0 AND altAGL <= horizStartAlt) {
-        
+    until isLanded or
+          fallingDeep or
+          altAGL <= groundClearance or
+          (velHorizMag > 1.0 and altAGL <= horizStartAlt) {
+        set phase to "freefall".
         flightState().
-        SET throttleCmd TO 0.
-        // В Coast ракета всегда стремится к вертикали плавно
-        SET steerFacing TO rotateToward(steerFacing, SHIP:UP:FOREVECTOR, maxSlewDeg, 0.1).
-        LOCK STEERING TO steerFacing.
-        
-        LOCAL aimErr TO VANG(SHIP:FACING:FOREVECTOR, SHIP:UP:FOREVECTOR).
-        LOCAL wantWarp TO 0.
-        
-        IF throttleCmd < 0.01 AND velVert < -1 AND aimErr <= maxWarpAim AND faceRate <= maxWarpRate AND timeToBrake > coastLeadTime * 2 {
-            IF timeToBrake > coastLeadTime * 10 { SET wantWarp TO 4. }
-            ELSE IF timeToBrake > coastLeadTime * 5 { SET wantWarp TO 3. }
-            ELSE IF timeToBrake > coastLeadTime * 3 { SET wantWarp TO 2. }
-            ELSE { SET wantWarp TO 1. }
+        set throttleCmd to 0.
+
+        set steerFacing to SHIP:UP:FOREVECTOR.
+
+        local aimErr to VANG(SHIP:FACING:FOREVECTOR, SHIP:UP:FOREVECTOR).
+        local wantWarp to 0.
+
+        if throttleCmd < 0.01 and velVert < -1 and
+           aimErr <= maxWarpAim and faceRate <= maxWarpRate and
+           timeToBrake > coastLeadTime * 2 {
+            if timeToBrake > coastLeadTime * 10 { set wantWarp to 4. }
+            else if timeToBrake > coastLeadTime * 5 { set wantWarp to 3. }
+            else if timeToBrake > coastLeadTime * 3 { set wantWarp to 2. }
+            else { set wantWarp to 1. }
         }
-        
-        IF wantWarp <> currentWarp {
-            SET WARP TO wantWarp.
-            SET currentWarp TO wantWarp.
-            WAIT 0.2.
+
+        if wantWarp <> currentWarp {
+            set WARP to wantWarp.
+            set currentWarp to wantWarp.
+            wait 0.2.
         }
-        
-        IF TIME:SECONDS > nextDiagTimer {
-            printDiag().
-            SET nextDiagTimer TO TIME:SECONDS + 2.
-        }
-        
-        WAIT 0.
+
+        wait 0.
     }
 
     // --- Фаза SUICIDE ---
-    IF NOT isLanded AND velVert < 0 AND altAGL <= brakeAlt AND altAGL > finalAlt {
-        IF currentWarp > 0 {
-            SET WARP TO 0.
-            SET currentWarp TO 0.
-            WAIT 0.2.
+    if not isLanded and velVert < 0 and altAGL <= brakeAlt and abs(velVert) > finalApproachSpeed {
+        set phase to "suicide burn".
+        if currentWarp > 0 {
+            set WARP to 0.
+            set currentWarp to 0.
+            wait 0.2.
         }
-        SET GEAR TO TRUE.
-        PRINT "SUICIDE START".
-        
-        UNLOCK STEERING.
-        UNLOCK THROTTLE.
-        
-        // suicide_burn.ks также должен читать глобалы или иметь свои константы
-        // Здесь оставляем вызов с параметрами, так как suicide_burn может быть общим модулем
-        RUN suicide_burn(
-            finalAlt,
+
+        set GEAR to true.
+        print "SUICIDE START".
+
+        unlock STEERING.
+        unlock THROTTLE.
+
+        run suicide_burn(
+            groundClearance,
             finalApproachSpeed,
             suicideTiltDeg,
             touchdownSpeed,
             maxIgniteTiltDeg,
-            maxSlewDeg,
-            groundClearance
+            maxSlewDeg
         ).
-        
-        SET SAS TO FALSE.
-        SET steerFacing TO SHIP:FACING.
-        SET prevFaceVec TO steerFacing:FOREVECTOR.
-        SET throttleCmd TO 0.
-        LOCK THROTTLE TO throttleCmd.
-        LOCK STEERING TO steerFacing.
+
+        set SAS to false.
+        set steerFacing to SHIP:FACING.
+        set throttleCmd to 0.
+        lock THROTTLE to throttleCmd.
+        lock STEERING to steerFacing.
     }
 
     // --- Фаза FINAL ---
-    UNTIL isLanded OR altAGL > finalAlt {
+    until isLanded or altAGL > groundClearance {
+        set phase to "final".
         flightState().
-        SET GEAR TO TRUE.
-        SET throttleCmd TO 0. 
-        
-        IF twrNow < 1.05 {
-            SET throttleCmd TO 0.
-        } ELSE {
-            // Простой P-контроллер для финальной посадки
-            LOCAL targetMag TO touchdownSpeed + (altAGL / MAX(1, finalAlt)) * (finalApproachSpeed - touchdownSpeed).
-            LOCAL targetVel TO -targetMag.
-            LOCAL err TO targetVel - velVert.
-            LOCAL accCmd TO gravAcc + 1.5 * err.
-            
-            IF velVert > 0 AND altAGL < 30 { SET accCmd TO MIN(accCmd, gravAcc * 0.35). }
-            IF accCmd < 0 { SET accCmd TO 0. }
-            
-            SET throttleCmd TO clamp(accCmd / MAX(0.1, thrustAcc), 0, 1).
+        set GEAR to true.
+        set throttleCmd to 0.
+
+        if twrNow < 1.05 {
+            set throttleCmd to 0.
+        } else {
+            local targetMag to touchdownSpeed + (altAGL / MAX(1, groundClearance)) * (finalApproachSpeed - touchdownSpeed).
+            local targetVel to -targetMag.
+            local err to targetVel - velVert.
+            local accCmd to gravAcc + 1.5 * err.
+            if velVert > 0 and altAGL < 30 { set accCmd to MIN(accCmd, gravAcc * 0.35). }
+            if accCmd < 0 { set accCmd to 0. }
+            set throttleCmd to clamp(accCmd / MAX(0.1, thrustAcc), 0, 1).
         }
-        
-        // В Final ракета всегда стремится к вертикали плавно
-        SET steerFacing TO rotateToward(steerFacing, SHIP:UP:FOREVECTOR, maxSlewDeg, 0.1).
-        LOCK STEERING TO steerFacing.
-        
-        IF TIME:SECONDS > nextDiagTimer {
-            printDiag().
-            SET nextDiagTimer TO TIME:SECONDS + 2.
+
+        // Направление: вертикаль + небольшое отклонение для гашения горизонтали
+        local wantDir to SHIP:UP:FOREVECTOR.
+        if velHorizMag > 0.2 {
+            // Отклоняемся ПРОТИВ горизонтальной скорости
+            local brakeDir to (-1) * velHorizVec:NORMALIZED.
+            // Максимальное отклонение: 15 градусов
+            local tiltDeg to MIN(15, velHorizMag * 5).
+            local upDir to SHIP:UP:FOREVECTOR.
+            local axisVec to VCRS(upDir, brakeDir).
+            if vecIsOk(axisVec) and axisVec:MAG > 0.000001 {
+                set wantDir to (ANGLEAXIS(tiltDeg, axisVec:NORMALIZED) * upDir):NORMALIZED.
+            }
         }
-        
-        WAIT 0.
+
+        set steerFacing to wantDir.
+        wait 0.
+    }
+
+
+    if TIME:SECONDS > nextDiagTimer {
+        printDiag().
+        set nextDiagTimer to TIME:SECONDS + 2.
     }
 }
 
-// Завершение
-SET throttleCmd TO 0.
-SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
-UNLOCK THROTTLE.
-UNLOCK STEERING.
-SET WARP TO 0.
-SET SAS TO TRUE.
-SET GEAR TO TRUE.
-PRINT "=== ГОТОВО ===".
+// ==========================================================================
+// ЗАВЕРШЕНИЕ
+// ==========================================================================
+set throttleCmd to 0.
+set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.
+unlock THROTTLE.
+unlock STEERING.
+set WARP to 0.
+sas on.
+set GEAR to true.
+print "=== ГОТОВО ===".

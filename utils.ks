@@ -1,5 +1,7 @@
 @lazyglobal off.
-
+run math.
+run dis.
+run stg.
 // ==========================================================================
 // utils.ks — общие функции проекта
 // ==========================================================================
@@ -34,20 +36,6 @@ function vecIsOk { parameter vecValue.
 }
 
 // --------------------------------------------------------------------------
-// Ограничение значения
-// --------------------------------------------------------------------------
-function clamp { parameter valueNum. parameter loNum. parameter hiNum.
-    if valueNum < loNum { return loNum. }
-    if valueNum > hiNum { return hiNum. }
-    return valueNum.
-}
-
-// Алиас для совместимости со старыми вызовами
-function clampVal { parameter valueNum. parameter loNum. parameter hiNum.
-    return clamp(valueNum, loNum, hiNum).
-}
-
-// --------------------------------------------------------------------------
 // Безопасное деление
 // --------------------------------------------------------------------------
 function safeDiv { parameter numValue. parameter denValue. parameter fallbackValue.
@@ -64,14 +52,10 @@ function safeDiv { parameter numValue. parameter denValue. parameter fallbackVal
 // Нормализация углов
 // --------------------------------------------------------------------------
 function normDeg360 { parameter angValue.
-    if not isFiniteVal(angValue) { return 0. }
-
-    local normValue to angValue - 360 * FLOOR(angValue / 360).
-    if normValue < 0 { set normValue to normValue + 360. }
-    if normValue >= 360 { set normValue to normValue - 360. }
-    if not isFiniteVal(normValue) { return 0. }
-
-    return normValue.
+    local ang is angValue.
+    until ang >= 0 { set ang to ang + 360. }
+    until ang < 360 { set ang to ang - 360. }
+    return ang.
 }
 
 function wrap180Deg { parameter angValue.
@@ -495,95 +479,7 @@ function aimGate { parameter aimErr. parameter maxErr. parameter thr.
     return thr * clamp(COS(aimErr), 0.2, 1).
 }
 
-// --------------------------------------------------------------------------
-// Подсчёт ресурсов на конкретной ступени
-// stageIdx: индекс ступени (0 = текущая, 1 = следующая, ...)
-//           -1 = текущая (STAGE)
-// --------------------------------------------------------------------------
-function stageResources { parameter stageIdx.
-    local res to LEXICON().
-    
-    // Инициализация всех счётчиков
-    set res["LIQUIDFUEL"] to 0.
-    set res["OXIDIZER"] to 0.
-    set res["SOLIDFUEL"] to 0.
-    set res["MONOPROP"] to 0.
-    set res["XENON"] to 0.
-    set res["ELECTRICCHARGE"] to 0.
-    set res["INTAKEAIR"] to 0.
-    
-    // Флаги наличия типов ресурсов
-    set res["HAS_LF"] to false.
-    set res["HAS_OX"] to false.
-    set res["HAS_SOLID"] to false.
-    set res["HAS_AIR"] to false.
-    set res["HAS_PROP"] to false.
 
-    // Выбор ступени
-    local stg to STAGE.
-    if stageIdx >= 0 and stageIdx < SHIP:STAGES:LENGTH {
-        set stg to SHIP:STAGES[stageIdx].
-    }
-
-    for r in stg:RESOURCES {
-        if r:CAPACITY > 0.1 {
-            if r:NAME = "LiquidFuel" {
-                set res["HAS_LF"] to true.
-                set res["HAS_PROP"] to true.
-                set res["LIQUIDFUEL"] to res["LIQUIDFUEL"] + r:AMOUNT.
-            } else if r:NAME = "Oxidizer" {
-                set res["HAS_OX"] to true.
-                set res["HAS_PROP"] to true.
-                set res["OXIDIZER"] to res["OXIDIZER"] + r:AMOUNT.
-            } else if r:NAME = "SolidFuel" {
-                set res["HAS_SOLID"] to true.
-                set res["HAS_PROP"] to true.
-                set res["SOLIDFUEL"] to res["SOLIDFUEL"] + r:AMOUNT.
-            } else if r:NAME = "MonoPropellant" {
-                set res["HAS_PROP"] to true.
-                set res["MONOPROP"] to res["MONOPROP"] + r:AMOUNT.
-            } else if r:NAME = "XenonGas" {
-                set res["HAS_PROP"] to true.
-                set res["XENON"] to res["XENON"] + r:AMOUNT.
-            } else if r:NAME = "ElectricCharge" {
-                set res["ELECTRICCHARGE"] to res["ELECTRICCHARGE"] + r:AMOUNT.
-            } else if r:NAME = "IntakeAir" {
-                set res["HAS_AIR"] to true.
-                set res["INTAKEAIR"] to res["INTAKEAIR"] + r:AMOUNT.
-            }
-        }
-    }
-    return res.
-}
-
-// --------------------------------------------------------------------------
-// Проверка наличия usable топлива на конкретной ступени
-// stageIdx: индекс ступени (-1 = текущая)
-// --------------------------------------------------------------------------
-function stageHasUsablePropellant { parameter stageIdx.
-    local res to stageResources(stageIdx).
-    
-    if not res["HAS_PROP"] { return true. }
-    if res["HAS_SOLID"] and res["SOLIDFUEL"] > 0.1 { return true. }
-    if res["HAS_LF"] and res["HAS_OX"] {
-        if res["LIQUIDFUEL"] > 0.1 and res["OXIDIZER"] > 0.1 { return true. }
-        if res["LIQUIDFUEL"] > 0.1 and res["HAS_AIR"] { return true. }
-        return false.
-    }
-    if res["HAS_LF"] { return res["LIQUIDFUEL"] > 0.1. }
-    if res["MONOPROP"] > 0.1 or res["XENON"] > 0.1 { return true. }
-    return false.
-}
-
-
-// --------------------------------------------------------------------------
-// Проверка: нужно ли отделять ступень (тяга или топливо текущей ступени)
-// --------------------------------------------------------------------------
-function shouldStage {
-    if SHIP:MAXTHRUST <= 0.01 { return true. }
-    if not stageHasUsablePropellant(-1) { return true. }
-    return false.
-}
 
 // --------------------------------------------------------------------------
 // PD-регулятор для плавного управления тягой
@@ -600,3 +496,161 @@ function pidThrottle { parameter targetAccel. parameter currentAccel. parameter 
     local output to kp * error + kd * derivative.
     return LIST(output, error).
 }
+
+// ==========================================================================
+// Расчёт требуемой тяги для заданного TWR на текущем теле.
+// Возвращает требуемую тягу в кН.
+//
+// Использование:
+//   local needThr to requiredThrust().          // 1.2g на текущей высоте
+//   local needThr to requiredThrust(1.5).       // 1.5g на текущей высоте
+//   local needThr to requiredThrust(1.2, 0).    // 1.2g на уровне моря
+//   local needThr to requiredThrust(2.0, 50000, BODY). // 2g на 50 км
+//
+// Параметры:
+//   twrVal  — желаемый thrust-to-weight ratio (по умолчанию 1.2)
+//   altM    — высота над уровнем моря (по умолчанию текущая высота корабля)
+//   bodyRef — тело (по умолчанию BODY)
+// ==========================================================================
+function requiredThrust {
+    parameter twrVal is 1.2.
+    parameter altM is -1.
+    parameter bodyRef is BODY.
+
+    // Высота: если не задана, берём текущую
+    local hVal to altM.
+    if not isFiniteVal(hVal) or hVal < 0 {
+        set hVal to MAX(0, SHIP:ALTITUDE).
+    }
+
+    // Радиус от центра тела
+    local rVal to bodyRef:RADIUS + hVal.
+    if not isFiniteVal(rVal) or rVal < 1 {
+        return 0.
+    }
+
+    // Локальная гравитация
+    local gVal to bodyRef:MU / (rVal * rVal).
+    if not isFiniteVal(gVal) or gVal <= 0 {
+        return 0.
+    }
+
+    // Масса корабля
+    local mVal to MAX(0.001, SHIP:MASS).
+
+    // TWR
+    local tw to twrVal.
+    if not isFiniteVal(tw) or tw <= 0 {
+        set tw to 1.2.
+    }
+
+    // Тяга = TWR * m * g
+    return tw * mVal * gVal.
+}
+
+
+
+// Функция расчета времени прожига для заданного dV
+global function calculate_burn_dist {
+    parameter dV. // Сколько скорости нужно погасить (м/с)
+    parameter safety_buffer is 0.
+    
+    local m is SHIP:MASS.
+    local a_ship is SHIP:AVAILABLETHRUST / m. // Ускорение корабля (м/с^2)
+    // 2. Считаем местную гравитацию g на текущей высоте
+    local rr is BODY:RADIUS + SHIP:ALTITUDE.
+    local g_local is BODY:MU / (rr^2).
+    
+    // 3. Расчет дистанции торможения по формуле
+    // (a_ship - g_local) — это чистое ускорение торможения против силы тяжести
+    local burn_distance is (dV^2) / (2 * (a_ship - g_local)) + safety_buffer.
+    
+    // 4. Истинная высота до поверхности (высота радара)
+    //local radar_alt is SHIP:ALTITUDE - SHIP:GEOPOSITION:TERRAINHEIGHT.
+    return burn_distance.
+}
+
+function toRad { parameter degr. return CONSTANT:PI*degr/180. }
+function toDegr { parameter rads. return rads*180/CONSTANT:PI. }
+
+
+// Функция возвращает время в секундах для перемещения между alt_start и alt_end
+// с учетом начальной вертикальной скорости (v_start)
+function get_freefall_time_with_v {
+    parameter alt_start. // Начальная высота над уровнем моря (м)
+    parameter alt_end.   // Конечная высота над уровнем моря (м)
+    parameter v_start.   // Начальная вертикальная скорость (м/с). Отрицательная — вниз, положительная — вверх.
+
+    if alt_start = alt_end return 0.
+
+    local mu is BODY:MU.
+    local r0 is BODY:RADIUS + alt_start.
+    local r1 is BODY:RADIUS + alt_end.
+
+    // 1. Находим полную специфическую механическую энергию (E)
+    local energy is (v_start^2 / 2) - (mu / r0).
+
+    // Защита от гиперболических траекторий (скорость выше третьей космической)
+    // Для простоты и стабильности посадочных скриптов считаем, что орбита замкнута (energy < 0)
+    if energy >= 0 {
+        print "Предупреждение: Скорость выше побега планеты! Точный расчет кеплеровых эллипсов невозможен.".
+        return 0.
+    }
+
+    // 2. Находим большую полуось орбиты падения (a)
+    local a is -mu / (2 * energy).
+
+    // Вспомогательная функция для расчета эксцентрической аномалии (E_anom) через радиус
+    // Так как это чисто вертикальное движение, угловой момент равен 0, и эксцентриситет e = 1.
+    // Формула связи: r = a * (1 - cos(E_anom))
+    local get_eccentric_anomaly is {
+        parameter r_current, a_semi, v_current.
+        local cos_E is 1 - (r_current / a_semi).
+        
+        // Защита от ошибок округления границ для арккосинуса
+        if cos_E > 1 set cos_E to 1.
+        if cos_E < -1 set cos_E to -1.
+        
+        local E_rad is arccos(cos_E) * (constant:pi / 180).
+        
+        // Коррекция полусферы: если объект движется вверх (v > 0), 
+        // аномалия должна отражать фазу до прохождения апоцентра.
+        if v_current > 0 {
+            set E_rad to 2 * constant:pi - E_rad.
+        }
+        return E_rad.
+    }.
+
+    // 3. Находим эксцентрические аномалии для начальной и конечной точек
+    local E0 is get_eccentric_anomaly(r0, a, v_start).
+    
+    // Для конечной точки нам нужно определить, куда мы движемся в этот момент.
+    // Находим скорость в конечной точке из закона сохранения энергии
+    local v1_sq is 2 * (energy + (mu / r1)).
+    if v1_sq < 0 return 0. // Энергии не хватает, чтобы долететь до этой высоты
+    local v1 is sqrt(v1_sq).
+    
+    // Если мы начали движение вниз, или начали вверх, но цель ниже апоцентра, то у цели скорость будет вниз (-)
+    if v_start < 0 or r1 < r0 {
+        set v1 to -v1.
+    }
+    local E1 is get_eccentric_anomaly(r1, a, v1).
+
+    // 4. Считаем средние аномалии (M = E_anom - sin(E_anom)) для e = 1
+    local M0 is E0 - sin(E0 * (180 / constant:pi)).
+    local M1 is E1 - sin(E1 * (180 / constant:pi)).
+
+    // 5. Разница во времени между двумя средними аномалиями
+    local time_factor is sqrt(a^3 / mu).
+    local t_fall is time_factor * (M1 - M0).
+
+    // Если время получилось отрицательным (например, при переходе через апоцентр),
+    // корректируем его на период вырожденной орбиты
+    if t_fall < 0 {
+        local period is 2 * constant:pi * time_factor.
+        set t_fall to t_fall + period.
+    }
+
+    return t_fall.
+}
+

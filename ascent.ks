@@ -8,7 +8,7 @@ PARAMETER turnStartAlt IS 250.
 // PARAMETER turnEndAlt IS 55000.
 PARAMETER autoStage IS TRUE.
 PARAMETER stageDelay IS 2.
-PARAMETER insertionMargin IS 2000.
+PARAMETER insertionMargin IS -1.
 PARAMETER orbitTolerance IS 500.
 PARAMETER fineTuneApoapsis IS TRUE.
 
@@ -22,19 +22,16 @@ IF targetPeriapsis > targetApoapsis {
     SET targetApoapsis TO targetPeriapsis.
 }
 IF insertionMargin < 0 {
-    SET insertionMargin TO 0.
+    SET insertionMargin TO 2 * targetApoapsis / 75000.
 }
 
 SET ascentAp TO targetApoapsis + insertionMargin.
 
 // Динамический расчёт конца гравитационного поворота на основе атмосферы
-SET turnEndAlt TO calcTurnEndAlt().
+SET turnEndAlt TO min(calcTurnEndAlt(), ascentAp).
 
-// Защита от слишком короткого профиля поворота (минимум 5 км на поворот)
-IF turnEndAlt - turnStartAlt < 5000 {
-    SET turnEndAlt TO turnStartAlt + 5000.
-}
-
+// Защита от слишком короткого профиля поворота
+set turnEndAlt to min(turnEndAlt, ascentAp).
 
 FUNCTION calcTurnEndAlt {
     // Для тел БЕЗ атмосферы: летим вертикально до 10 км.
@@ -63,7 +60,7 @@ FUNCTION calcTurnEndAlt {
 }
 
 CLEARSCREEN.
-SET SAS TO FALSE.
+sas off.
 SET SHIP:CONTROL:PILOTMAINTHROTTLE TO 0.
 SET throttleSet TO 0.
 LOCK THROTTLE TO throttleSet.
@@ -88,7 +85,10 @@ IF SHIP:STATUS = "PRELAUNCH" {
     SET nextStageTime TO TIME:SECONDS + stageDelay.
     SET t0 TO TIME:SECONDS.
     WAIT UNTIL SHIP:MAXTHRUST > 0 OR TIME:SECONDS > t0 + 5.
+    print "Поехали!".
 }
+lock ap TO SHIP:ORBIT:APOAPSIS.
+lock pe TO SHIP:ORBIT:PERIAPSIS.
 
 UNTIL phase = "done" {
     SET now TO TIME:SECONDS.
@@ -99,8 +99,6 @@ UNTIL phase = "done" {
     
     SET altit TO SHIP:ALTITUDE.
     SET relAlt TO altit - launchAlt.
-    SET ap TO SHIP:ORBIT:APOAPSIS.
-    SET pe TO SHIP:ORBIT:PERIAPSIS.
     SET speed TO SHIP:AIRSPEED.
     SET pressure TO atmPressure(altit).
     SET dynPres TO dynPressure(altit, SHIP:AIRSPEED).
@@ -118,30 +116,24 @@ UNTIL phase = "done" {
     
     IF phase = "ascent" {
         // Коастим, если:
-        // - высота > 60% от конца гравити-тёрна
-        // - горизонтальная скорость > 80% орбитальной
-        // - вертикальная скорость мала
         // - апоцентр уже выше атмосферы (можно добирать скорость в вакууме)
-        // - вертикальная скорость отрицательная (ракета начинает падать)
-        SET readyForCoast TO (relAlt > turnEndAlt * 0.8)
-            OR (horizSpeed > 0.85 * vOrbNow)
-            OR (ABS(vertSpeed) < 20)
-            OR (ap > BODY:ATM:HEIGHT)
-            OR (vertSpeed < -30).
         
         IF pe >= targetPeriapsis - 100 AND ap <= targetApoapsis + orbitTolerance {
             SET throttleSet TO 0.
             SET phase TO "done".
-        } ELSE IF ap >= ascentAp AND readyForCoast {
+        } ELSE IF ap >= ascentAp {
             SET throttleSet TO 0.
             SET phase TO "coastToAp".
         } ELSE {
-            SET throttleSet TO 1.
+            local needThr to requiredThrust(2).
+            //print needThr + " " + SHIP:MAXTHRUST.
+            SET throttleSet TO needThr / MAX(0.01, SHIP:AVAILABLETHRUST).
             IF dynPres > maxQ {
                 SET throttleSet TO clamp(maxQ / dynPres, 0.05, 1).
             }
             // Дополнительная защита: если скорость слишком высока для текущей высоты
             IF pressure > 0.001 AND speed > vOrbNow * 0.95 {
+                print "Обнаружен пережёг!".
                 SET throttleSet TO MIN(throttleSet, 0.7).
             }
             
@@ -152,6 +144,7 @@ UNTIL phase = "done" {
                 SET vFrac TO clamp(horizSpeed / vOrbNow, 0, 1).
                 SET pitchAlt TO 90 - 90 * altFrac.
                 SET pitchVel TO 90 - 90 * vFrac.
+                //print "by alt:" + round(pitchAlt,1) + " by vel:" + ROUND(pitchVel,1).
                 SET targetPitch TO MIN(pitchAlt, pitchVel).
 
                 // Если ракета теряет вертикальную скорость в атмосфере — опускаем нос

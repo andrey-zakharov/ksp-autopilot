@@ -1,20 +1,30 @@
+// runpath("0:/boot/copy").
+switch to 1. // vessel
 LIST FILES IN fileList.
 FOR f in fileList {
    DELETEPATH(f).
 }
 list files.
-
-copypath("0:/utils", "1:/").
-copypath("0:/exec_node", "1:/").
+function fill { parameter name.
+	compile "0:/" + name + ".ks" TO "1:/" + name + ".ksm".
+}
+fill("math").
+fill("dis").
+fill("stg").
+fill("m_lib").
+fill("exec_node").
 if SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED" OR ship:status = "PRELAUNCH" {
 	sas on.
-	copypath("0:/ascent", "1:/").
+	fill("utils").
+	fill("ascent").
 } else {
-	copypath("0:/suicide_burn", "1:/").
-	copypath("0:/deorbit_phase", "1:/").
-	copypath("0:/land", "1:/").
-	copypath("0:/horizontal_brake", "1:/").
-	copypath("0:/find_landing_site", "1:/").
+	fill("utils").
+	fill("suicide_burn").
+	fill("deorbit_phase").
+	fill("land").
+	fill("horizontal_brake").
+	fill("find_landing_site").
 }
 print "status " + ship:status.
 list files.
+switch to 0.

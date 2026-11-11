@@ -1,15 +1,47 @@
 // ==========================================================================
 // suicide_burn.ks — финальное торможение перед посадкой
 // ==========================================================================
-PARAMETER exitAlt IS 100.
+PARAMETER clearance IS 30.
 PARAMETER exitSpeed IS 10.
 PARAMETER maxTiltDeg IS 8.
 PARAMETER touchdownSpeed IS 0.
 PARAMETER maxIgniteTiltDeg IS 15.
 PARAMETER slewDeg IS 10.
-PARAMETER clearance IS 30. // Безопасный запас от земли, метры
-
+// maxTiltDeg - 0 on clearance height, 90 on above safe orbit
 RUN utils.
+global function calc_burn_dist { 
+    parameter sbTiltDeg is 0.
+    parameter touchdownSpeed is 0.
+    if body <> body {
+        return -1.
+    }
+
+    LOCAL sbMass IS MAX(0.001, SHIP:MASS).
+
+    // Для управления используем МАКСИМАЛЬНУЮ тягу, а не текущую доступную.
+    // AVAILABLETHRUST может зависеть от текущего дросселя и давать заниженную оценку.
+    LOCAL sbMaxThrust IS SHIP:MAXTHRUST.
+    IF sbMaxThrust <= 0.01 {
+        SET sbMaxThrust TO SHIP:AVAILABLETHRUST.
+    }
+
+    local sbMaxAcc IS MAX(0.01, sbMaxThrust / sbMass).
+    LOCAL sbG IS safeDiv(BODY:MU, (BODY:RADIUS + SHIP:ALTITUDE)^2, 0.01).
+
+    local sbVVertAbs IS ABS(VDOT(SHIP:VELOCITY:SURFACE, SHIP:UP:FOREVECTOR)).
+
+    // Максимальное чистое вертикальное торможение вниз, которое мы можем дать.
+    local sbNetMax IS MAX(0.01, sbMaxAcc * cos(sbTiltDeg) - sbG).
+
+    // Остановочный путь при максимальной тяге.
+    local sbStopDist is (sbVVertAbs * sbVVertAbs - touchdownSpeed * touchdownSpeed) /
+                        (2 * sbNetMax).
+
+    return sbStopDist.
+}
+
+//print "Время прожига для полной остановки: " + round(delay_time, 2) + " сек.".
+
 
 GLOBAL sbThrottle IS 0.
 GLOBAL sbSteer IS SHIP:FACING.
@@ -27,7 +59,7 @@ LOCK STEERING TO sbSteer.
 
 UNTIL SHIP:STATUS = "LANDED" OR
       SHIP:STATUS = "SPLASHED" OR
-      (sbAlt <= exitAlt AND ABS(sbVVert) <= MAX(exitSpeed, 5)) OR
+      sbAlt <= clearance OR sbVVert > 0 OR
       sbAlt <= 1.0 {
 
     SET sbNow TO TIME:SECONDS.
@@ -123,23 +155,21 @@ UNTIL SHIP:STATUS = "LANDED" OR
     }
 
     // У самой земли не даем ракете уйти вверх.
-    IF sbVVert > 0 AND sbAlt < MAX(50, exitAlt * 1.5) {
+    IF sbVVert > 0 AND sbAlt < MAX(50, clearance * 1.5) {
         LOCAL hoverThr IS safeDiv(sbG, MAX(0.01, sbMaxAcc * sbVertFrac), 0.25).
         SET sbThrottle TO MIN(sbThrottle, hoverThr).
     }
 
-    // Гейт ориентации.
     SET sbThrottle TO thrustGate(sbThrottle, sbDesired, maxIgniteTiltDeg).
     SET sbThrottle TO clamp(sbThrottle, 0, 1).
 
-    // Поворот команды.
-    SET sbSteer TO rotateToward(sbSteer, sbDesired, slewDeg, sbDt).
+    SET sbSteer TO sbDesired.
 
     // Диагностика.
     IF sbNow >= sbDiagTimer {
         PRINT "SB alt=" + ROUND(sbAlt) +
               " eff=" + ROUND(sbEffAlt) +
-              " stop=" + ROUND(sbStopDist) +
+              " stop=" + ROUND(sbStopDist) + " dist=" + ROUND(calc_burn_dist(sbTiltDeg)) +
               " vV=" + ROUND(sbVVert,1) +
               " aM=" + ROUND(sbAccMeas,2) +
               " netMax=" + ROUND(sbNetMax,2) +
