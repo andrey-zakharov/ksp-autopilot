@@ -24,7 +24,7 @@ function getNearestPhiToNormal { parameter pos. parameter vel. parameter tgtNorm
     local nUse to tgtNorm:NORMALIZED.
 
     local nodesVec to VCRS(myNorm, nUse):NORMALIZED.
-    showVec(nodesVec * pos:MAG, RED, "nodesVec", SHIP:BODY:POSITION).
+    //showVec(nodesVec * pos:MAG, RED, "nodesVec", SHIP:BODY:POSITION).
     local anphi to ARCCOS(clamp(VDOT(pos:NORMALIZED, nodesVec), -1, 1)).
 
     if VDOT(VCRS(pos, nodesVec):NORMALIZED, myNorm) < 0 {
@@ -99,16 +99,16 @@ function printStatus {
 
 function getNormalFromOrbitalElements { parameter incDeg. parameter lanDeg.
     local nAxis to BODY:ANGULARVEL:NORMALIZED.
-    local rDir to SOLARPRIMEVECTOR - (VDOT(SOLARPRIMEVECTOR, nAxis) * nAxis).
-    if rDir:MAG < 0.000001 {
-        set rDir to V(1, 0, 0).
-        if ABS(VDOT(rDir, nAxis)) > 0.9 { set rDir to V(0, 0, 1). }
-        set rDir to rDir - (VDOT(rDir, nAxis) * nAxis).
+    local ref to (SOLARPRIMEVECTOR - VDOT(SOLARPRIMEVECTOR, nAxis) * nAxis):NORMALIZED.
+    if ref:MAG < 0.000001 {
+        set ref to V(1, 0, 0).
+        if ABS(VDOT(ref, nAxis)) > 0.9 { set ref to V(0, 0, 1). }
+        set ref to ref - (VDOT(ref, nAxis) * nAxis).
     }
-    local pDir to VCRS(rDir:NORMALIZED, nAxis):NORMALIZED.
+    local pDir to VCRS(ref, nAxis):NORMALIZED.
 
     return (COS(incDeg) * nAxis -
-            SIN(incDeg) * ((SIN(lanDeg) * rDir) + (COS(lanDeg) * pDir))):NORMALIZED.
+            SIN(incDeg) * ((SIN(lanDeg) * ref) + (COS(lanDeg) * pDir))):NORMALIZED.
 }
 
 function align_inclination {
@@ -165,10 +165,10 @@ function align_inclination {
     // executing
     sas off.
     local sign is 1. if not isAN { set sign to -1. }
-    lock aimV to sign * VCRS(SHIP:POSITION - SHIP:BODY:POSITION, SHIP:VELOCITY:ORBIT):NORMALIZED.
-    lock steering to aimV.
+    lock goal to sign * VCRS(SHIP:POSITION - SHIP:BODY:POSITION, SHIP:VELOCITY:ORBIT):NORMALIZED.
+    lock steering to goal.
     countDown.
-    kuniverse:quicksave.
+    kuniverse:QUICKSAVETO("align").
     print "Game quicksaved before executing".
     execAim(STEERINGMANAGER:TARGET:FOREVECTOR).
     safeWarpTo(nodeTime - burntime - 15).
@@ -177,25 +177,26 @@ function align_inclination {
     lock throttle to thrl.
     until TIME:SECONDS >= burnStart - 0.5 {
         wait 0.25.
+        print round(burnStart - TIME:SECONDS) + "s remains" at (0, 0).
     }
     set WARP to 0.
     print "BURN start!".
 
     local incl is inclination(SHIP, tNorm).
     local dIncl is 0.
-    until incl <= 0.1 or dIncl > 0.1 {
+    until incl <= 0.1 or dIncl > 0 {
         set dIncl to incl.
         set incl to inclination(SHIP, tNorm).
         set dIncl to incl - dIncl.
         set thrl to MIN(1, incl / 2).
         //print "dInc=" +  at (0, 0).
-        print "inc=" + round(incl, 1) + "° " + round(dIncl,2).
+        print "inc=" + round(incl, 1) + "° " + round(dIncl,2) at(0, 0).
         wait 0.1.
     }
     set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.
     unlock throttle.
     unlock steering.
-    unlock aimV.
+    unlock goal.
     sas on.
     print "inclination: " + ROUND(inclination(SHIP, tNorm), 2) + "°".
 }

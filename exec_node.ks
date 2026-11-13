@@ -1,9 +1,7 @@
 @LAZYGLOBAL ON.
-RUNONCEPATH("math").
-RUNONCEPATH("dis").
-RUNONCEPATH("stg").
-RUNONCEPATH("m_lib").
-
+for f in list("math", "dis", "stg", "m_lib") {
+    RUNONCEPATH(f).
+}
 
 parameter targetNode is 0.
 parameter dvLimit is 0.5. // what limit to check
@@ -46,9 +44,10 @@ function execMain {
 
     local burnTime to sumBurnTime(dvMag).
     local startEta to burnTime / 2 + MAX(2, MIN(20, SHIP:MASS / 10)).
-
+    // script starts
+    kuniverse:QUICKSAVETO("exec_node").
     lock STEERING to targetNode:DELTAV.
-
+    
     execAim(targetNode:DELTAV, targetNode:time - startEta - 5 - time:seconds).
 
     print "NODE dV=" + ROUND(dvMag, 1) +
@@ -63,14 +62,15 @@ function execMain {
         return false.
     }
 
-    execAim(targetNode:DELTAV).
+    local finalDev is execAim(targetNode:DELTAV).
 
     if not execAlive(targetNode) {
         unlock STEERING.
         return false.
     }
 
-    print "waiting " + disTime(targetNode:time - burnTime / 2 - TIME:SECONDS).
+
+    print "waiting " + disTime(targetNode:time - burnTime / 2 - TIME:SECONDS) + " with final deviation="+round(finalDev, 1)+"°".
     wait until time:seconds >= targetNode:time - burnTime / 2.
     lock minDvLimit to 5 * 0.05 * SHIP:AVAILABLETHRUST / SHIP:MASS.  // один тик цикла ниже - в пять раз больше - лимит  прожига
     print "Burning with minDv= " + round(minDvLimit, 1) + "m/s...".
@@ -86,6 +86,15 @@ function execMain {
         }
 
         local thrCmd to 1.
+        if vang( targetNode:DELTAV, SHIP:FACING:FOREVECTOR ) > finalDev {
+            print "DEVIATION DETECTED!!! " + round(vdot(targetNode:DELTAV, SHIP:FACING:FOREVECTOR),2) at (0, 2). // hurry status
+            // HASGIMBAL
+            if stageHasGimbal() {
+                set thrCmd to thrCmd * vdot(targetNode:DELTAV, SHIP:FACING:FOREVECTOR).
+            } else {
+                set thrCmd to 0.
+            }
+        }
         if targetNode:DELTAV:MAG < minDvLimit {
             // Плавная тяга пропорционально остатку
             local acc to MAX(0.1, SHIP:MAXTHRUST / SHIP:MASS).

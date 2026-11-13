@@ -79,7 +79,7 @@ SET horizSpeed TO 0.
 SET vertSpeed TO 0.
 SET vOrbNow TO 0.
 SET targetPitch TO 90.
-
+kuniverse:QUICKSAVETO("ascent").
 IF SHIP:STATUS = "PRELAUNCH" {
     STAGE.
     SET nextStageTime TO TIME:SECONDS + stageDelay.

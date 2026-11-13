@@ -79,6 +79,16 @@ function stageHasUsablePropellant { parameter stageIdx.
     return false.
 }
 
+global function stageHasGimbal { 
+    list ENGINES in vhlEngs.
+    for eng in vhlEngs {
+        if eng:HASGIMBAL {
+            return true.
+        }
+    }
+    return false.
+}
+
 
 // --------------------------------------------------------------------------
 // Проверка: нужно ли отделять ступень (тяга или топливо текущей ступени)

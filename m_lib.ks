@@ -28,4 +28,5 @@ function execAim { parameter aimVec. parameter timeOutSec is 20.
 
     wait until VANG(SHIP:FACING:FOREVECTOR, aimH) <= 1 or TIME:SECONDS > tEnd.
     PRINT "Aligned (angle=" + ROUND(VANG(SHIP:FACING:FOREVECTOR, aimH), 2) + "deg).".
+    return VANG(SHIP:FACING:FOREVECTOR, aimH).
 }
