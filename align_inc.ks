@@ -3,31 +3,28 @@
 // При вызове с onlyLib=true только загружает функции, не запускает основной код.
 RUNONCEPATH("utils").
 RUNONCEPATH("m_lib").
+RUNONCEPATH("debug").
 parameter onlyLib is false.
 //parameter apT is 0.
 //parameter peT is 0.
-parameter inclT is 0.
+parameter inclT is 361.
 parameter lonAscNode is 0. // longitude of ascending node, in degrees.
 
 function unsafeBodyPos { parameter bd is SHIP.
-    return POSITIONAT(bd, TIMESTAMP(TIME:SECONDS)) - bd:BODY:POSITION.
-}
-
-function showVec { parameter drawVec. parameter color is WHITE. parameter label is "". parameter origin is SHIP:POSITION.
-    local v1 is VECDRAW(origin, drawVec, color, label).
-    set v1:show to true.
-    return v1.
+    return bd:POSITION - bd:BODY:POSITION.
+    //return POSITIONAT(bd, TIMESTAMP(TIME:SECONDS)) - bd:BODY:POSITION.
 }
 
 
 // Ближайший узел пересечения орбиты с произвольной нормалью.
 // Аргументы: позиция корабля от центра тела, орбитальная скорость, целевая нормаль.
-// Возвращает LIST(phi_deg, sign, inclination_deg) — аналогично getNearestPhi.
+// Возвращает LIST(phi_deg, sign inclination_deg).
 function getNearestPhiToNormal { parameter pos. parameter vel. parameter tgtNorm.
     local myNorm to VCRS(pos, vel):NORMALIZED.
     local nUse to tgtNorm:NORMALIZED.
 
     local nodesVec to VCRS(myNorm, nUse):NORMALIZED.
+    showVec(nodesVec * pos:MAG, RED, "nodesVec", SHIP:BODY:POSITION).
     local anphi to ARCCOS(clamp(VDOT(pos:NORMALIZED, nodesVec), -1, 1)).
 
     if VDOT(VCRS(pos, nodesVec):NORMALIZED, myNorm) < 0 {
@@ -100,24 +97,18 @@ function printStatus {
     print "true anom: " at(0, i). print ROUND(SHIP:ORBIT:TRUEANOMALY, 1) + " deg" at(tabPos, i).
 }
 
-// ==========================================================================
-// Вычисление нормали орбиты по наклонению (inc) и долготе восходящего узла (LAN).
-// Использует SOLARPRIMEVECTOR как абсолютное опорное направление.
-// ==========================================================================
 function getNormalFromOrbitalElements { parameter incDeg. parameter lanDeg.
-    local refDir to SOLARPRIMEVECTOR.
-    local bodyNorth to BODY:ANGULARVEL:NORMALIZED.
-    local refProj to refDir - (VDOT(refDir, bodyNorth) * bodyNorth).
-    // Защита от вырожденного случая (ось вращения совпадает с опорным вектором)
-    if refProj:MAG < 0.000001 {
-        local fallback to V(1, 0, 0).
-        if ABS(VDOT(fallback, bodyNorth)) > 0.9 { set fallback to V(0, 0, 1). }
-        set refProj to fallback - (VDOT(fallback, bodyNorth) * bodyNorth).
+    local nAxis to BODY:ANGULARVEL:NORMALIZED.
+    local rDir to SOLARPRIMEVECTOR - (VDOT(SOLARPRIMEVECTOR, nAxis) * nAxis).
+    if rDir:MAG < 0.000001 {
+        set rDir to V(1, 0, 0).
+        if ABS(VDOT(rDir, nAxis)) > 0.9 { set rDir to V(0, 0, 1). }
+        set rDir to rDir - (VDOT(rDir, nAxis) * nAxis).
     }
-    set refProj to refProj:NORMALIZED.
-    local nodeVec to ANGLEAXIS(lanDeg, bodyNorth) * refProj.
-    local normalVec to ANGLEAXIS(incDeg, nodeVec) * bodyNorth.
-    return normalVec:NORMALIZED.
+    local pDir to VCRS(rDir:NORMALIZED, nAxis):NORMALIZED.
+
+    return (COS(incDeg) * nAxis -
+            SIN(incDeg) * ((SIN(lanDeg) * rDir) + (COS(lanDeg) * pDir))):NORMALIZED.
 }
 
 function align_inclination {
@@ -128,17 +119,18 @@ function align_inclination {
     local ecc is SHIP:ORBIT:ECCENTRICITY.
     print "e: " + round(ecc, 5).
     local orbitNode is -1.
+    local tNorm is V(0, 0, 0).
     if abs(inclT) < 360 {
         print "by orbit params".
          // Вектор нормали орбиты в координатах kOS - не работает, нужен reference
         //lock tNorm to V( sin(inclT)*sin(lan), cos(inclT), -sin(inclT)* cos(lan)):NORMALIZED.
         
-        lock tNorm to getNormalFromOrbitalElements(inclT, lan).
+        set tNorm to getNormalFromOrbitalElements(inclT, lan).
         set orbitNode to getNearestPhiToNormal(unsafeBodyPos, SHIP:VELOCITY:ORBIT, tNorm).
 
     } else {
         print "by target orbit".
-        lock tNorm to VCRS(unsafeBodyPos(TARGET), TARGET:VELOCITY:ORBIT):NORMALIZED.
+        set tNorm to VCRS(unsafeBodyPos(TARGET), TARGET:VELOCITY:ORBIT):NORMALIZED.
 
         // Ближайший узел пересечения орбиты корабля с орбитой цели.
         // Возвращает LIST(phi_deg, sign, inclination_deg):
@@ -147,9 +139,12 @@ function align_inclination {
         set orbitNode to getNearestPhiToNormal(unsafeBodyPos, SHIP:VELOCITY:ORBIT, tNorm).
     }
 
-    showVec(VCRS(unsafeBodyPos, SHIP:VELOCITY:ORBIT):NORMALIZED * unsafeBodyPos:MAG, GREEN, "my normal", SHIP:BODY:POSITION).
-    showVec(tNorm * unsafeBodyPos:MAG, WHITE, "target normal", SHIP:BODY:POSITION).
-    
+    //showVec(VCRS(unsafeBodyPos, SHIP:VELOCITY:ORBIT):NORMALIZED * unsafeBodyPos:MAG, GREEN, "my normal", SHIP:BODY:POSITION).
+    //showVec(tNorm * unsafeBodyPos:MAG, WHITE, "target normal", SHIP:BODY:POSITION).
+    //local realNorm is VCRS(unsafeBodyPos(TARGET), TARGET:VELOCITY:ORBIT):NORMALIZED.
+    //showVec(realNorm * unsafeBodyPos:MAG, RED, "TARGET", SHIP:BODY:POSITION).
+    //print "Угол: " + ROUND(VANG(tNorm, realNorm), 4) + " deg".
+    //print "Скаляр: " + ROUND(VDOT(tNorm, realNorm), 6).
     local isAN is orbitNode[1] > 0.
     local current is abs(orbitNode[1]).
     print "nearest found: ".
@@ -200,6 +195,7 @@ function align_inclination {
     set SHIP:CONTROL:PILOTMAINTHROTTLE to 0.
     unlock throttle.
     unlock steering.
+    unlock aimV.
     sas on.
     print "inclination: " + ROUND(inclination(SHIP, tNorm), 2) + "°".
 }

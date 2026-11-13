@@ -22,8 +22,8 @@ function sumBurnTime { parameter needDeltaV.
     return burnTime.
 }
 
-function execAim { parameter aimV. parameter timeOutSec is 20.
-    local aimH to aimV:NORMALIZED.
+function execAim { parameter aimVec. parameter timeOutSec is 20.
+    local aimH to aimVec:NORMALIZED.
     local tEnd to TIME:SECONDS + timeOutSec.
 
     wait until VANG(SHIP:FACING:FOREVECTOR, aimH) <= 1 or TIME:SECONDS > tEnd.

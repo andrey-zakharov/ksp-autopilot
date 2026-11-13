@@ -47,9 +47,8 @@ function execMain {
     local burnTime to sumBurnTime(dvMag).
     local startEta to burnTime / 2 + MAX(2, MIN(20, SHIP:MASS / 10)).
 
-
-
     lock STEERING to targetNode:DELTAV.
+
     execAim(targetNode:DELTAV, targetNode:time - startEta - 5 - time:seconds).
 
     print "NODE dV=" + ROUND(dvMag, 1) +

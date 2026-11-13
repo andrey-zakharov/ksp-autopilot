@@ -36,3 +36,4 @@ function disMet { parameter meters. parameter digs is 1.
     }
     return round(meters, digs) + "m".
 }
+
