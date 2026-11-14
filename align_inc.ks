@@ -4,74 +4,13 @@
 RUNONCEPATH("utils").
 RUNONCEPATH("m_lib").
 RUNONCEPATH("debug").
+RUNONCEPATH("orbit_lib").
 parameter onlyLib is false.
 //parameter apT is 0.
 //parameter peT is 0.
 parameter inclT is 361.
 parameter lonAscNode is 0. // longitude of ascending node, in degrees.
 
-function unsafeBodyPos { parameter bd is SHIP.
-    return bd:POSITION - bd:BODY:POSITION.
-    //return POSITIONAT(bd, TIMESTAMP(TIME:SECONDS)) - bd:BODY:POSITION.
-}
-
-
-// Ближайший узел пересечения орбиты с произвольной нормалью.
-// Аргументы: позиция корабля от центра тела, орбитальная скорость, целевая нормаль.
-// Возвращает LIST(phi_deg, sign inclination_deg).
-function getNearestPhiToNormal { parameter pos. parameter vel. parameter tgtNorm.
-    local myNorm to VCRS(pos, vel):NORMALIZED.
-    local nUse to tgtNorm:NORMALIZED.
-
-    local nodesVec to VCRS(myNorm, nUse):NORMALIZED.
-    //showVec(nodesVec * pos:MAG, RED, "nodesVec", SHIP:BODY:POSITION).
-    local anphi to ARCCOS(clamp(VDOT(pos:NORMALIZED, nodesVec), -1, 1)).
-
-    if VDOT(VCRS(pos, nodesVec):NORMALIZED, myNorm) < 0 {
-        set anphi to 360 - anphi.
-    }
-    local dnphi to MOD(anphi + 180, 360).
-    local incDeg to VANG(myNorm, nUse).
-
-    if anphi <= dnphi {
-        return LIST(anphi, incDeg).
-    } else {
-        return LIST(dnphi, -incDeg).
-    }
-}
-
-// Истинная аномалия (град) -> эксцентрическая (град)
-function convertTAtoEA { parameter ta. parameter ecc.
-    return 2 * ARCTAN2(SQRT(1 - ecc) * SIN(ta / 2), SQRT(1 + ecc) * COS(ta / 2)).
-}
-
-// Эксцентрическая аномалия (град) -> средняя (град)
-// Формула Кеплера M = E - e*sin(E) работает в радианах,
-// поэтому e*sin(E) умножается на 180/PI для перевода в градусы.
-function convertEAtoMA { parameter ea. parameter ecc.
-    return ea - ecc * SIN(ea) * (180 / CONSTANT:PI).
-}
-
-// Истинная аномалия (град) -> средняя аномалия (град)
-function getMA { parameter trueanom. parameter ecc.
-    return convertEAtoMA(convertTAtoEA(trueanom, ecc), ecc).
-}
-
-// Время до узла по углу phi (град) от текущей истинной аномалии.
-// Возвращает секунды.
-function getTimeToPhi { parameter phiDeg. parameter ecc. parameter period. parameter curNu.
-    local m0 to getMA(curNu, ecc).
-    local m1 to getMA(curNu + phiDeg, ecc).
-    local dM to m1 - m0.
-    until dM > 0 { set dM to dM + 360. }
-    //print "dM: " + ROUND(deltaM, 1).
-    return dM / (360 / MAX(1, period)).
-}
-
-// dV для смены наклонения на given скорости
-function getInclDeltaV { parameter orbvel. parameter deltaincl.
-    return 2 * orbvel * SIN(deltaincl / 2).
-}
 
 function countDown { parameter delay is 5.
     local warmStart is TIME:SECONDS + delay.
@@ -97,20 +36,6 @@ function printStatus {
     print "true anom: " at(0, i). print ROUND(SHIP:ORBIT:TRUEANOMALY, 1) + " deg" at(tabPos, i).
 }
 
-function getNormalFromOrbitalElements { parameter incDeg. parameter lanDeg.
-    local nAxis to BODY:ANGULARVEL:NORMALIZED.
-    local ref to (SOLARPRIMEVECTOR - VDOT(SOLARPRIMEVECTOR, nAxis) * nAxis):NORMALIZED.
-    if ref:MAG < 0.000001 {
-        set ref to V(1, 0, 0).
-        if ABS(VDOT(ref, nAxis)) > 0.9 { set ref to V(0, 0, 1). }
-        set ref to ref - (VDOT(ref, nAxis) * nAxis).
-    }
-    local pDir to VCRS(ref, nAxis):NORMALIZED.
-
-    return (COS(incDeg) * nAxis -
-            SIN(incDeg) * ((SIN(lanDeg) * ref) + (COS(lanDeg) * pDir))):NORMALIZED.
-}
-
 function align_inclination {
     //parameter apT is 0.
     //parameter peT is 0.
@@ -126,22 +51,22 @@ function align_inclination {
         //lock tNorm to V( sin(inclT)*sin(lan), cos(inclT), -sin(inclT)* cos(lan)):NORMALIZED.
         
         set tNorm to getNormalFromOrbitalElements(inclT, lan).
-        set orbitNode to getNearestPhiToNormal(unsafeBodyPos, SHIP:VELOCITY:ORBIT, tNorm).
+        set orbitNode to getNearestPhiToNormal(bodyPosOf, SHIP:VELOCITY:ORBIT, tNorm).
 
     } else {
         print "by target orbit".
-        set tNorm to VCRS(unsafeBodyPos(TARGET), TARGET:VELOCITY:ORBIT):NORMALIZED.
+        set tNorm to VCRS(bodyPosOf(TARGET), TARGET:VELOCITY:ORBIT):NORMALIZED.
 
         // Ближайший узел пересечения орбиты корабля с орбитой цели.
         // Возвращает LIST(phi_deg, sign, inclination_deg):
         //   phi_deg — угол от текущей позиции до ближайшего узла
         //   inclination_deg — угол между нормалями орбит (>0 восходящий узел, <0 нисходящий)
-        set orbitNode to getNearestPhiToNormal(unsafeBodyPos, SHIP:VELOCITY:ORBIT, tNorm).
+        set orbitNode to getNearestPhiToNormal(bodyPosOf, SHIP:VELOCITY:ORBIT, tNorm).
     }
 
-    //showVec(VCRS(unsafeBodyPos, SHIP:VELOCITY:ORBIT):NORMALIZED * unsafeBodyPos:MAG, GREEN, "my normal", SHIP:BODY:POSITION).
-    //showVec(tNorm * unsafeBodyPos:MAG, WHITE, "target normal", SHIP:BODY:POSITION).
-    //local realNorm is VCRS(unsafeBodyPos(TARGET), TARGET:VELOCITY:ORBIT):NORMALIZED.
+    //showVec(VCRS(bodyPosOf, SHIP:VELOCITY:ORBIT):NORMALIZED * bodyPosOf:MAG, GREEN, "my normal", SHIP:BODY:POSITION).
+    //showVec(tNorm * bodyPosOf:MAG, WHITE, "target normal", SHIP:BODY:POSITION).
+    //local realNorm is VCRS(bodyPosOf(TARGET), TARGET:VELOCITY:ORBIT):NORMALIZED.
     //showVec(realNorm * unsafeBodyPos:MAG, RED, "TARGET", SHIP:BODY:POSITION).
     //print "Угол: " + ROUND(VANG(tNorm, realNorm), 4) + " deg".
     //print "Скаляр: " + ROUND(VDOT(tNorm, realNorm), 6).

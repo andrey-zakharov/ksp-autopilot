@@ -229,6 +229,7 @@ lock fallingDeep to (velVert < 0 and altAGL <= brakeAlt).
 if SHIP:ORBIT:PERIAPSIS > 0 and SHIP:VELOCITY:ORBIT:MAG > 5 {
     print "Деорбит: pe=" + ROUND(SHIP:ORBIT:PERIAPSIS) +
           " v=" + ROUND(SHIP:VELOCITY:ORBIT:MAG, 1).
+    kuniverse:quicksaveto("land").
     run deorbit_phase(horizStartAlt, 100, 48, 8, 1, 1.0, 3000, doDeorbitCorrection).
 
     sas off.

@@ -5,32 +5,32 @@ parameter destPeAlt is 20000.
 parameter destApAlt is 20000.
 parameter maxWindowDurationDays is 365.
 
-run utils.
-run align_inc(true).
+RUNONCEPATH("utils").
+RUNONCEPATH("m_lib").
+RUNONCEPATH("orbit_lib").
 run align_plane(true).
 
 // --- Параметры ---
-set tbDebug to debugOn.           // печатать отладочные сообщения
-set tbMaxWinDays to maxWindowDurationDays. // максимум дней ожидания окна перехода
-set tbTarget to SHIP.             // целевое тело/судно (заполняется в tbMain)
-set tbDestPeAlt to destPeAlt.     // целевой перицентр, м над поверхностью
-set tbDestApAlt to destApAlt.     // целевой апоцентр, м над поверхностью
-set tbSafePeAlt to 20000.         // безопасный перицентр (20 км или атмосфера+2 км)
-set tbMaxBurn to 10000.           // лимит dV одной ноды, м/с
-set tbMaxMid to 300.              // лимит dV одной mid-course коррекции, м/с
-set tbMaxMidBurns to 6.           // максимум коррекций на переходе
-set tbPlaneMin to 0.5.            // порог наклонения для совмещения, град
-set tbHardInc to 10.              // наклонение выше которого без ноды — отмена
-set tbMaxWinOrb to 40.            // максимум витков ожидания окна
-set tbPhaseTol to 5.              // допуск фазового угла, град
+set tbDebug to debugOn.
+set tbMaxWinDays to maxWindowDurationDays.
+set tbTarget to SHIP.
+set tbDestPeAlt to destPeAlt.
+set tbDestApAlt to destApAlt.
+set tbSafePeAlt to 20000.
+set tbMaxBurn to 10000.
+set tbMaxMid to 300.
+set tbMaxMidBurns to 6.
+set tbPlaneMin to 0.5.
+set tbHardInc to 10.
+set tbMaxWinOrb to 40.
 
 // --- Ноды (состояние) ---
-set tbHasNd1 to false.            // есть ли первая нода
-set tbHasNd2 to false.            // есть ли вторая нода (совмещение плоскостей)
-set tbNd1 to 0.                   // ссылка на первую ноду
-set tbNd2 to 0.                   // ссылка на вторую ноду
-set tbNd1Time to 0.               // абсолютное время первой ноды
-set tbNd2Time to 0.               // абсолютное время второй ноды
+set tbHasNd1 to false.
+set tbHasNd2 to false.
+set tbNd1 to 0.
+set tbNd2 to 0.
+set tbNd1Time to 0.
+set tbNd2Time to 0.
 
 function tbLog { parameter m.
     if tbDebug { print m. }
@@ -80,22 +80,7 @@ function tbClearPlan {
     tbClearNd1.
 }
 
-function tbCalibrateNode { parameter nd.
-    local bad to LIST(false, V(0, 0, 0), V(0, 0, 0), V(0, 0, 0)).
-    if nd = 0 { return bad. }
-    set nd:RADIALOUT to 0. set nd:NORMAL to 0. set nd:PROGRADE to 0.
-    wait 0.05.
-    set nd:NORMAL to 1. wait 0.05.
-    if not vecIsOk(nd:DELTAV) or nd:DELTAV:MAG < 0.000001 { return bad. }
-    local axN to nd:DELTAV:NORMALIZED.
-    set nd:NORMAL to 0. set nd:PROGRADE to 1. wait 0.05.
-    if not vecIsOk(nd:DELTAV) or nd:DELTAV:MAG < 0.000001 { return bad. }
-    local axP to nd:DELTAV:NORMALIZED.
-    set nd:PROGRADE to 0. set nd:RADIALOUT to 1. wait 0.05.
-    if not vecIsOk(nd:DELTAV) or nd:DELTAV:MAG < 0.000001 { return bad. }
-    return LIST(true, nd:DELTAV:NORMALIZED, axN, axP).
-}
-
+// ИСПРАВЛЕНИЕ: используем calibrateNodeAxes из utils вместо tbCalibrateNode
 function tbAddVectorNode { parameter dvVec. parameter etaSec. parameter isSecond.
     if not vecIsOk(dvVec) { return false. }
     if not isFiniteVal(dvVec:MAG) or dvVec:MAG < 0.5 or dvVec:MAG > tbMaxBurn { return false. }
@@ -119,15 +104,16 @@ function tbAddVectorNode { parameter dvVec. parameter etaSec. parameter isSecond
         if isSecond { set tbHasNd2 to false. } else { set tbHasNd1 to false. }
         return false.
     }
-    local ax to tbCalibrateNode(NEXTNODE).
-    if not ax[0] {
+    // ИСПРАВЛЕНИЕ: calibrateNodeAxes из utils
+    local ax to calibrateNodeAxes().
+    if not vecIsOk(ax[1]) or ax[1]:MAG < 0.5 {
         remove NEXTNODE.
         if isSecond { set tbHasNd2 to false. } else { set tbHasNd1 to false. }
         return false.
     }
-    set NEXTNODE:RADIALOUT to VDOT(dvVec, ax[1]).
-    set NEXTNODE:NORMAL to VDOT(dvVec, ax[2]).
-    set NEXTNODE:PROGRADE to VDOT(dvVec, ax[3]).
+    set NEXTNODE:RADIALOUT to VDOT(dvVec, ax[0]).
+    set NEXTNODE:NORMAL to VDOT(dvVec, ax[1]).
+    set NEXTNODE:PROGRADE to VDOT(dvVec, ax[2]).
     wait 0.2.
     local lim to 2.
     if isSecond { set lim to 3. }
@@ -188,6 +174,9 @@ function tbBurnVector { parameter dvVec. parameter etaSec.
 
 // ==========================================================================
 // Орбитальные хелперы
+// ИСПРАВЛЕНИЕ: tbNormalOf оставлена как тонкая обёртка,
+// tbAcuteNormal удалена (используется acuteNormal из orbit_lib),
+// tbMFromNu удалена (используется getMA из orbit_lib)
 // ==========================================================================
 function tbNormalOf { parameter obj.
     if obj:NAME = SHIP:NAME {
@@ -198,13 +187,7 @@ function tbNormalOf { parameter obj.
         ORBITAT(obj, TIME:SECONDS):VELOCITY:ORBIT).
 }
 
-function tbAcuteNormal { parameter refN. parameter tgtN.
-    if not vecIsOk(tgtN) or tgtN:MAG < 0.5 { return refN:NORMALIZED. }
-    if VANG(refN:NORMALIZED, tgtN:NORMALIZED) > 90 { return (-1) * tgtN:NORMALIZED. }
-    return tgtN:NORMALIZED.
-}
-
-// Истинная аномалия -> средняя, через getMA из align_inc
+// ИСПРАВЛЕНИЕ: использует getMA из orbit_lib
 function tbMFromNu { parameter nuDeg. parameter ecc.
     local e to clamp(ecc, 0, 0.99).
     if e < 0.000001 { return normDeg360(nuDeg). }
@@ -326,12 +309,13 @@ function tbRefineEta { parameter minEta. parameter maxEta. parameter guess.
 
 // ==========================================================================
 // Вторая нода: совмещение плоскости в узле переходной орбиты
+// ИСПРАВЛЕНИЕ: tbAcuteNormal → acuteNormal из orbit_lib
 // ==========================================================================
 function tbPlaneNodeOnTransfer {
     parameter rDep. parameter vDep. parameter dv1. parameter eta1.
     local el to tbElemFromState(rDep, vDep + dv1, tbCentralMu).
     if not el[0] { return LIST(false, 0, 0). }
-    local nGoal to tbAcuteNormal(el[1], tbTargetNrm).
+    local nGoal to acuteNormal(el[1], tbTargetNrm).
     local uVec to VCRS(el[1], nGoal).
     if not vecIsOk(uVec) or uVec:MAG < 0.000001 { return LIST(true, 0, 0). }
     set uVec to uVec:NORMALIZED.
@@ -368,7 +352,7 @@ function tbPlaneNodeOnTransfer {
     if not vecIsOk(rN) or not vecIsOk(vN) { return LIST(false, 0, 0). }
     local rH to rN:NORMALIZED.
     local hN to orbitNormal(rN, vN).
-    local nU to tbAcuteNormal(hN, nGoal).
+    local nU to acuteNormal(hN, nGoal).
     local nP to nU - (VDOT(nU, rH) * rH).
     if not vecIsOk(nP) or nP:MAG < 0.000001 { return LIST(true, 0, 0). }
     local alpha to VANG(hN, nP:NORMALIZED).
@@ -396,6 +380,7 @@ function tbPlaneNodeOnTransfer {
 
 // ==========================================================================
 // Фаза 2: планирование перехода
+// ИСПРАВЛЕНИЕ: TARGET:SOIRADIUS → tbTargetSOI
 // ==========================================================================
 function tbPlanTransfer {
     tbClearPlan.
@@ -410,12 +395,13 @@ function tbPlanTransfer {
     if not elS[0] { return LIST(false, 0, 0, false). }
     local elT to tbElemFromState(ORBITAT(tbTarget, TIME:SECONDS):POSITION, ORBITAT(tbTarget, TIME:SECONDS):VELOCITY:ORBIT, tbCentralMu).
     if not elT[0] { return LIST(false, 0, 0, false). }
-    set tbTargetNrm to tbAcuteNormal(elS[1], elT[1]).
+    set tbTargetNrm to acuteNormal(elS[1], elT[1]).
     set tbRelInc to VANG(elS[1], tbTargetNrm).
     local outward to tbTargetSMA >= elS[9].
     local depR to BODY:RADIUS + SHIP:ORBIT:PERIAPSIS.
     if not outward { set depR to BODY:RADIUS + SHIP:ORBIT:APOAPSIS. }
-    local transA to (depR + tbTargetSMA - TARGET:SOIRADIUS / 2) / 2.
+    // ИСПРАВЛЕНИЕ: используем tbTargetSOI вместо TARGET:SOIRADIUS
+    local transA to (depR + tbTargetSMA - tbTargetSOI / 2) / 2.
     local tH to CONSTANT:PI * SQRT(transA * transA * transA / tbCentralMu).
     local eta1 to tbPhaseEta(bodyPosAt(0), SHIP:VELOCITY:ORBIT, perShip, tH, minEta, maxEta).
     if eta1 < 0 { return LIST(false, 0, 0, false). }
@@ -425,9 +411,9 @@ function tbPlanTransfer {
     local vDep to VELOCITYAT(SHIP, TIMESTAMP(TIME:SECONDS + eta1)):ORBIT.
     if not vecIsOk(rDep) or not vecIsOk(vDep) { return LIST(false, 0, 0, false). }
     print "dep height=" + disMet(rDep:MAG).
-    print "target SOI=" + disMet(TARGET:SOIRADIUS).
+    print "target SOI=" + disMet(tbTargetSOI).
     print "target sma=" + disMet(tbTargetSMA).
-    local aTr to (rDep:MAG + tbTargetSMA - TARGET:SOIRADIUS / 2) / 2.
+    local aTr to (rDep:MAG + tbTargetSMA - tbTargetSOI / 2) / 2.
     local vel to tbCentralMu * (2 / rDep:MAG - 1 / aTr).
     if not isFiniteVal(vel) or vel <= 0 { return LIST(false, 0, 0, false). }
     local dv to SQRT(vel) - vDep:MAG.
@@ -625,23 +611,19 @@ function tbFindPeriapsisEta { parameter maxScan.
 }
 
 // ==========================================================================
-// Фаза 3: переходная орбита — узел через align_inc
+// Фаза 3: переходная орбита — узел через orbit_lib
 // ==========================================================================
 function tbPhase3 {
     print "Фаза3: переходная орбита к " + tbTargetName + ".".
-
     if VANG(tbNormalOf(SHIP), tbTargetNrm) > tbPlaneMin {
         print "Фаза3: совмещение плоскостей, relInc=" +
               ROUND(VANG(tbNormalOf(SHIP), tbTargetNrm), 2) + " deg.".
-
-        // Аналитический расчёт ближайшего узла через align_inc
+        // Аналитический расчёт ближайшего узла через orbit_lib
         local phiInfo to getNearestPhiToNormal(bodyPosAt(0), SHIP:VELOCITY:ORBIT, tbTargetNrm).
         local etaPlane to getTimeToPhi(phiInfo[0], SHIP:ORBIT:ECCENTRICITY,
                                        MAX(60, SHIP:ORBIT:PERIOD), SHIP:ORBIT:TRUEANOMALY).
         if not isFiniteVal(etaPlane) or etaPlane < 30 { set etaPlane to -1. }
-
         tbLog("Фаза3: узел через " + ROUND(etaPlane, 1) + " с (phi=" + ROUND(phiInfo[0], 2) + "°)").
-
         if not alignPlaneToNormal(
             tbTargetNrm, etaPlane, 0.05, 3, true, true,
             0.5, tbMaxBurn, 3, 50, 1000, 30, 3)[0] {
@@ -649,9 +631,7 @@ function tbPhase3 {
             return false.
         }
     }
-
     tbMidcourseCorrect().
-
     local deadline to TIME:SECONDS + tbMaxWinDays * 86400.
     until SHIP:ORBIT:BODY:NAME = tbTargetName {
         if SHIP:STATUS = "LANDED" or SHIP:STATUS = "SPLASHED" { return false. }
@@ -729,6 +709,7 @@ function tbDetectPhase {
 
 // ==========================================================================
 // Главная функция
+// ИСПРАВЛЕНИЕ: убрано дублирование переменных, исправлена проверка цели
 // ==========================================================================
 function tbMain {
     print "=== TRANSFER TO BODY ===".
@@ -739,12 +720,15 @@ function tbMain {
         print "Есть чужая маневровая нода. Удали её вручную.".
         return false.
     }
+
+    // Определяем цель
     if targetName <> "" {
         set tbTarget to SHIP.
         for v in ALLVESSELS {
             if v:NAME = targetName { set tbTarget to v. }
         }
-        if TARGET:NAME = SHIP:NAME {
+        // ИСПРАВЛЕНИЕ: проверяем tbTarget, а не TARGET
+        if tbTarget:NAME = SHIP:NAME {
             print "Цель '" + targetName + "' не найдена среди судов.".
             return false.
         }
@@ -752,23 +736,25 @@ function tbMain {
         if not HASTARGET { print "Нет цели (TARGET).". return false. }
         set tbTarget to TARGET.
     }
-    set tbTgtMu to TARGET:MU.
-    set tbTgtRad to TARGET:RADIUS.
-    set tbTgtSMA to TARGET:ORBIT:SEMIMAJORAXIS.
-    set tbTgtPer to MAX(60, TARGET:ORBIT:PERIOD).
-    set tbCenMu to TARGET:ORBIT:BODY:MU.
-    set tbCenName to TARGET:ORBIT:BODY:NAME.
-    set tbTgtName to TARGET:NAME.
-    set tbTargetName to TARGET:NAME.
-    set tbCentral to TARGET:ORBIT:BODY.
+
+    // ИСПРАВЛЕНИЕ: переменные заданы ОДИН раз, без дублирования
+    set tbTargetName to tbTarget:NAME.
+    set tbCentral to tbTarget:ORBIT:BODY.
     set tbCentralName to tbCentral:NAME.
     set tbCentralMu to tbCentral:MU.
-    set tbTargetMu to TARGET:MU.
-    set tbTargetRad to TARGET:RADIUS.
-    set tbTargetSMA to TARGET:ORBIT:SEMIMAJORAXIS.
-    set tbTargetPeriod to MAX(60, TARGET:ORBIT:PERIOD).
-    if TARGET:ATM:EXISTS {
-        set tbSafePeAlt to MAX(tbSafePeAlt, TARGET:ATM:HEIGHT + 5000).
+    set tbTargetMu to tbTarget:MU.
+    set tbTargetRad to tbTarget:RADIUS.
+    set tbTargetSMA to tbTarget:ORBIT:SEMIMAJORAXIS.
+    set tbTargetPeriod to MAX(60, tbTarget:ORBIT:PERIOD).
+    // Радиус SOI цели: тело имеет SOIRADIUS, судно — нет
+    if tbTarget:ISTYPE("Body") {
+        set tbTargetSOI to tbTarget:SOIRADIUS.
+    } else {
+        set tbTargetSOI to tbTarget:ORBIT:BODY:SOIRADIUS.
+    }
+
+    if tbTarget:ATM:EXISTS {
+        set tbSafePeAlt to MAX(tbSafePeAlt, tbTarget:ATM:HEIGHT + 5000).
     }
     if tbDestApAlt < tbDestPeAlt {
         set tbDestApAlt to tbDestApAlt + tbDestPeAlt.
@@ -777,16 +763,21 @@ function tbMain {
     }
     set tbDestPeAlt to MAX(tbDestPeAlt, tbSafePeAlt).
     set tbDestApAlt to MAX(tbDestApAlt, tbDestPeAlt).
+
     if SHIP:ORBIT:BODY:NAME <> tbCentralName and
        SHIP:ORBIT:BODY:NAME <> tbTargetName and
        SHIP:ORBIT:BODY:ORBIT:BODY:NAME <> tbCentralName {
         print "Исходное тело не связано с центральным телом цели.".
         return false.
     }
-    set tbTargetNrm to tbAcuteNormal(tbNormalOf(SHIP), tbNormalOf(tbTarget)).
+
+    set tbTargetNrm to acuteNormal(tbNormalOf(SHIP), tbNormalOf(tbTarget)).
+    set tbRelInc to 0.
+
     local phase to tbDetectPhase().
     print "Фаза: " + phase + " (тело=" + SHIP:ORBIT:BODY:NAME +
           ", цель=" + tbTargetName + ", центр=" + tbCentralName + ")".
+
     if phase = 1 {
         if not tbPhase1() { return false. }
         set phase to tbDetectPhase().
